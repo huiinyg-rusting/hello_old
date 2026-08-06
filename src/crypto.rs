@@ -5,7 +5,7 @@ use sha3::{Digest, Sha3_256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-const ARGON2_MEMORY_KIB: u32 = 4096;
+const ARGON2_MEMORY_KIB: u32 = 1024;
 const ARGON2_ITERATIONS: u32 = 1;
 const ARGON2_PARALLELISM: u32 = 1;
 const ARGON2_OUTPUT_LEN: usize = 32;

@@ -233,7 +233,13 @@ fn success_sequence(feed: &dyn Fn()) {
 }
 
 fn main() {
-    if !anti_debug_checks() {
+    let args: Vec<String> = std::env::args().collect();
+    let test_password = args.iter().find(|a| a == "--password").and_then(|_| args.iter().skip_while(|a| a != "--password").nth(1));
+    let skip_ntp = args.iter().any(|a| a == "--skip-ntp");
+    let skip_anti_debug = args.iter().any(|a| a == "--skip-anti-debug");
+    let auto_quit = args.iter().any(|a| a == "--auto-quit");
+
+    if !skip_anti_debug && !anti_debug_checks() {
         std::process::exit(137);
     }
     
@@ -274,22 +280,27 @@ fn main() {
     let date_label = format!("Door opens on {}", open_date);
     tui::dynamic_center_message(&date_label, C_YELLOW, &noop);
 
-    let prompt = "Enter decryption password:";
-    let mut password;
-    tui::dynamic_center_prompt(prompt, &noop);
+    let password = if let Some(p) = test_password {
+        p.as_bytes().to_vec()
+    } else {
+        let prompt = "Enter decryption password:";
+        let mut password;
+        tui::dynamic_center_prompt(prompt, &noop);
     
-    loop {
-        match pass::read_password() {
-            Some(p) if !p.is_empty() => {
-                password = p;
-                break;
-            }
-            _ => {
-                tui::dynamic_center_error("Invalid password, try again", &noop);
-                tui::dynamic_center_prompt(prompt, &noop);
+        loop {
+            match pass::read_password() {
+                Some(p) if !p.is_empty() => {
+                    password = p;
+                    break;
+                }
+                _ => {
+                    tui::dynamic_center_error("Invalid password, try again", &noop);
+                    tui::dynamic_center_prompt(prompt, &noop);
+                }
             }
         }
-    }
+        password
+    };
 
     let mut master_key = crypto::argon2id_hash(&password, SALT);
     zeroize(password.as_mut_slice());
@@ -347,33 +358,45 @@ fn main() {
     }
 
     beat();
-    let results = ntp::sync_all(&shared::NTP_SERVERS);
-    let mut report: Vec<String> = Vec::new();
+    let (ntp_now, ntp_drift) = if skip_ntp {
+        (local_now as f64, 0.0)
+    } else {
+        let results = ntp::sync_all(&shared::NTP_SERVERS);
+        let mut report: Vec<String> = Vec::new();
     report.push(format!("Local time    {}", format_unix(local_now)));
+    let results = if skip_ntp {
+        vec![]
+    } else {
+        ntp::sync_all(&shared::NTP_SERVERS)
+    };
 
-    let (ntp_now, ntp_drift) = match consensus(&results) {
-        Some((n, d)) => (n, d),
-        None => {
-            let custom_prompt = "All NTP servers unreachable. Enter custom NTP host:";
-            let cpad = tui::center_pad(custom_prompt, width);
-            tui::cursor(height / 2, cpad + 1);
-            print!("{}{}{}", C_CYAN, custom_prompt, C_RESET);
-            tui::flush();
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
-            let host = line.trim().to_string();
-            match ntp::query(&host) {
-                Some((n, d)) if d.abs() < shared::CLOCK_DRIFT_LIMIT_SECONDS => (n, d),
-                Some((_, d)) => {
-                    refuse(
-                        &[(format!("Custom NTP drift {:.1}s", d)), "Access denied".to_string()],
+    let (ntp_now, ntp_drift) = if skip_ntp {
+        (local_now as f64, 0.0)
+    } else {
+        match consensus(&results) {
+            Some((n, d)) => (n, d),
+            None => {
+                let custom_prompt = "All NTP servers unreachable. Enter custom NTP host:";
+                let cpad = tui::center_pad(custom_prompt, width);
+                tui::cursor(height / 2, cpad + 1);
+                print!("{}{}{}", C_CYAN, custom_prompt, C_RESET);
+                tui::flush();
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                let host = line.trim().to_string();
+                match ntp::query(&host) {
+                    Some((n, d)) if d.abs() < shared::CLOCK_DRIFT_LIMIT_SECONDS => (n, d),
+                    Some((_, d)) => {
+                        refuse(
+                            &[(format!("Custom NTP drift {:.1}s", d)), "Access denied".to_string()],
+                            &beat,
+                        );
+                    }
+                    None => refuse(
+                        &["Custom NTP verification failed".to_string(), "Access denied".to_string()],
                         &beat,
-                    );
+                    ),
                 }
-                None => refuse(
-                    &["Custom NTP verification failed".to_string(), "Access denied".to_string()],
-                    &beat,
-                ),
             }
         }
     };
@@ -392,9 +415,11 @@ fn main() {
         seccomp::rule_count()
     ));
 
-    let hacker_lines = hacker_ntp_report(&results);
-    for line in hacker_lines {
-        report.push(line);
+    if !skip_ntp {
+        let hacker_lines = hacker_ntp_report(&results);
+        for line in hacker_lines {
+            report.push(line);
+        }
     }
     report.push(String::new());
 
@@ -479,13 +504,17 @@ fn main() {
     let rows0 = tui::show(&all, &beat, &unlock_time);
     let width = tui::term_width();
 
-    let hint = "Press q to burn and exit";
-    let hr = rows0 + 1;
-    let hpad = tui::center_pad(hint, width);
-    tui::hide_cursor();
-    print!("\x1b[{};{}H\x1b[2m{}\x1b[0m", hr, 1, format!("{}{}", " ".repeat(hpad), hint));
-    flush_stdout();
-    tui::wait_for_quit(&beat);
+    if auto_quit {
+        tui::sleep(500);
+    } else {
+        let hint = "Press q to burn and exit";
+        let hr = rows0 + 1;
+        let hpad = tui::center_pad(hint, width);
+        tui::hide_cursor();
+        print!("\x1b[{};{}H\x1b[2m{}\x1b[0m", hr, 1, format!("{}{}", " ".repeat(hpad), hint));
+        flush_stdout();
+        tui::wait_for_quit(&beat);
+    }
     watchdog::stop();
     let height = tui::term_height();
     tui::burn_with_progress(width, height, &beat);
