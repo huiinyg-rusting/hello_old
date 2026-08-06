@@ -1,0 +1,63 @@
+[package]
+name = "hello_old"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+sha3 = "0.10"
+libc = "0.2"
+argon2 = { version = "0.5", features = ["std"] }
+rand = { version = "0.8", features = ["std"] }
+getrandom = { version = "0.2", features = ["std"] }
+zeroize = "1.7"
+subtle = "2.5"
+
+[build-dependencies]
+chacha20poly1305 = "0.10"
+sha3 = "0.10"
+rand = { version = "0.8", features = ["std"] }
+getrandom = { version = "0.2", features = ["std"] }
+argon2 = { version = "0.5", features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = "symbols"
+debug = false
+
+[target.'cfg(target_os = "linux")'.rustflags]
+# Control Flow Integrity + Shadow Call Stack
+# Note: CFI requires nightly, shadow-call-stack requires aarch64 or x86_64 with clang
+# For stable: use -Z sanitizer=cfi (nightly only) or rely on hardware CET
+# These flags work with nightly toolchain
+# rustflags = ["-Z", "sanitizer=cfi", "-Z", "sanitizer=shadow-call-stack"]
+
+# Stable-hardening flags
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "force-frame-pointers=yes",
+    "-C", "default-linker-libraries=clang",
+]
+
+# For nightly CFI, uncomment and use nightly:
+# [profile.release]
+# rustflags = ["-Z", "sanitizer=cfi", "-Z", "sanitizer=shadow-call-stack", "-C", "force-frame-pointers=yes"]
+
+# Windows support note: This binary targets Linux only (seccomp, ptrace, mmap guard pages, mlock)
+# Windows port would require: 
+# - Replace seccomp with Windows API restrictions (Job Objects, Mitigation Policies)
+# - Replace ptrace with CheckRemoteDebuggerPresent/IsDebuggerPresent
+# - Replace mmap/mprotect with VirtualAlloc/VirtualProtect
+# - Replace mlock with VirtualLock
+# - Replace /proc checks with NtQueryInformationProcess
+# Current implementation: Linux-only
+
+# no_std feasibility: NOT FEASIBLE for current implementation because:
+# - chacha20poly1305, argon2, rand, getrandom require std
+# - libc, mmap, mlock, ptrace, seccomp are Linux syscalls requiring std::os
+# - std::thread, std::sync, std::time, std::net (NTP) all need std
+# - Panic handling, alloc, collections all need std
+# Migration would require: custom allocator, no_std crypto crates, raw syscalls, ~6 months rewrite
