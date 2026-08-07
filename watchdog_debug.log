@@ -1,0 +1,16 @@
+main: key_sha=[222, 19, 53, 212, 137, 32, 153, 95, 19, 102, 215, 188, 33, 128, 169, 228, 217, 147, 6, 76, 217, 34, 176, 88, 162, 63, 127, 145, 13, 250, 247, 233]
+watchdog thread started, exe_sha=[191, 24, 69, 165, 198, 3, 125, 245, 11, 46, 3, 193, 139, 14, 54, 61, 82, 137, 113, 252, 97, 23, 24, 127, 140, 50, 26, 121, 12, 55, 140, 135]
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+main: all key=[136, 61, 230, 95, 93, 211, 77, 203, 129, 9, 201, 5, 171, 161, 46, 87, 100, 132, 109, 222, 48, 13, 42, 93, 34, 65, 97, 21, 243, 187, 154, 206, 73, 184, 152, 11, 110, 55, 174, 63, 82, 120, 223, 173, 168, 44, 97, 210, 42, 234, 43, 185, 175, 36, 3, 64, 119, 190, 103, 179, 58, 212, 55, 92]
+main: k1=[136, 61, 230, 95, 93, 211, 77, 203, 129, 9, 201, 5, 171, 161, 46, 87, 100, 132, 109, 222, 48, 13, 42, 93, 34, 65, 97, 21, 243, 187, 154, 206], k2=[73, 184, 152, 11, 110, 55, 174, 63, 82, 120, 223, 173, 168, 44, 97, 210, 42, 234, 43, 185, 175, 36, 3, 64, 119, 190, 103, 179, 58, 212, 55, 92]
+watchdog check: stale=false, traced=false
+main: decrypt PAYLOAD layer 1 failed
+self_destruct invoked at 1786084002 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)

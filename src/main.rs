@@ -15,6 +15,15 @@ use std::io::{IsTerminal, Write};
 use zeroize::Zeroize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
+
+fn log_self_destruct(msg: &str) {
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("/home/admin/gitHub/hello_old/watchdog_debug.log") {
+        let _ = writeln!(f, "{}", msg);
+        let _ = f.flush();
+    }
+}
 
 const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin"));
 const TS_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts.bin"));
@@ -214,7 +223,7 @@ fn success_sequence(feed: &dyn Fn()) {
     
     for msg in msgs {
         tui::dynamic_center_message(msg, C_GREEN, feed);
-        tui::sleep(300);
+        tui::sleep(50);
     }
     
     tui::clear();
@@ -226,7 +235,7 @@ fn success_sequence(feed: &dyn Fn()) {
             print!("{}{}{}", C_GREEN, g, C_RESET);
         }
         tui::flush();
-        tui::sleep(30);
+        tui::sleep(50);
         feed();
     }
     
@@ -327,12 +336,13 @@ fn main() {
 
     for i in 0..6 {
         fx.draw(i as f32 / 5.0, &noop);
-        tui::sleep(35);
+        tui::sleep(50);
     }
     fx.advance();
 
     fx.draw(0.0, &noop);
     if !rustyvm::run(&prog, KM, &mut keys) {
+        log_self_destruct("main: rustyvm run failed");
         watchdog::self_destruct();
     }
     zeroize(prog.as_mut_slice());
@@ -342,11 +352,12 @@ fn main() {
     zeroize(&mut keys);
     for i in 0..5 {
         fx.draw(0.3 + i as f32 * 0.14, &noop);
-        tui::sleep(35);
+        tui::sleep(50);
     }
     fx.advance();
 
     let key_sha = crypto::sha3_256(&key_copy64(&key_buf));
+    log_self_destruct(&format!("main: key_sha={:?}", key_sha));
     let feed: Arc<Mutex<Instant>> = watchdog::start(key_sha, key_buf.ptr as usize, 64);
     key_buf.lock_ro();
     let beat = || {
@@ -382,7 +393,7 @@ fn main() {
     }
     for i in 0..3 {
         fx.draw(0.8 + i as f32 * 0.07, &beat);
-        tui::sleep(30);
+        tui::sleep(50);
     }
     fx.advance();
 
@@ -425,7 +436,7 @@ fn main() {
     };
     for i in 0..4 {
         fx.draw(0.5 + i as f32 * 0.12, &beat);
-        tui::sleep(30);
+        tui::sleep(50);
     }
     fx.advance();
 
@@ -455,21 +466,24 @@ fn main() {
     let mut k2 = [0u8; 32];
     {
         let mut all = key_copy64(&key_buf);
+        log_self_destruct(&format!("main: all key={:?}", all));
         k1.copy_from_slice(&all[..32]);
         k2.copy_from_slice(&all[32..]);
+        log_self_destruct(&format!("main: k1={:?}, k2={:?}", k1, k2));
         zeroize(&mut all);
     }
 
     let open_ts = {
         let mut blob = match crypto::decrypt(&k1, TS_BLOB) {
             Some(b) => b,
-            None => watchdog::self_destruct(),
+            None => { log_self_destruct("main: decrypt TS_BLOB failed"); watchdog::self_destruct(); }
         };
         let mut arr = [0u8; 8];
         arr.copy_from_slice(&blob[..8]);
         let ts = u64::from_le_bytes(arr);
         crypto::zeroize(blob.as_mut_slice());
         if !crypto::ct_eq(&ts.to_le_bytes(), &shared::OPEN_TIMESTAMP_UNIX_SECONDS.to_le_bytes()) {
+            log_self_destruct("main: timestamp mismatch");
             watchdog::self_destruct();
         }
         ts
@@ -481,6 +495,7 @@ fn main() {
             TS_PLAIN[4], TS_PLAIN[5], TS_PLAIN[6], TS_PLAIN[7],
         ]);
         if plain_ts != shared::OPEN_TIMESTAMP_UNIX_SECONDS || plain_ts != open_ts {
+            log_self_destruct("main: plain timestamp mismatch");
             watchdog::self_destruct();
         }
     }
@@ -496,7 +511,7 @@ fn main() {
     }
     for i in 0..4 {
         fx.draw(0.55 + i as f32 * 0.1, &beat);
-        tui::sleep(35);
+        tui::sleep(50);
     }
 
     beat();
@@ -504,11 +519,11 @@ fn main() {
     let mut payload = {
         let mut inner = match crypto::decrypt(&k1, PAYLOAD) {
             Some(c) => c,
-            None => watchdog::self_destruct(),
+            None => { log_self_destruct("main: decrypt PAYLOAD layer 1 failed"); watchdog::self_destruct(); }
         };
         let out = match crypto::decrypt(&k2, &inner) {
             Some(c) => c,
-            None => watchdog::self_destruct(),
+            None => { log_self_destruct("main: decrypt PAYLOAD layer 2 failed"); watchdog::self_destruct(); }
         };
         crypto::zeroize(inner.as_mut_slice());
         crypto::zeroize(&mut k1);
@@ -517,11 +532,13 @@ fn main() {
     };
     // Verify and parse metadata (first 4 bytes = length, followed by JSON)
     if payload.len() < 4 {
+        log_self_destruct("main: payload len < 4");
         watchdog::self_destruct();
     }
     let meta_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let meta_len_usize = meta_len as usize;
     if payload.len() < 4 + meta_len_usize {
+        log_self_destruct("main: payload len < 4 + meta_len");
         watchdog::self_destruct();
     }
     let meta_bytes = &payload[4..4 + meta_len_usize];
@@ -546,7 +563,7 @@ fn main() {
 
     for i in 0..4 {
         fx.draw(0.6 + i as f32 * 0.1, &beat);
-        tui::sleep(10);
+        tui::sleep(50);
     }
     fx.finish(&beat);
 

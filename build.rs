@@ -1,6 +1,6 @@
 use std::fs;
-// Print project title at build time
-println!("hello_old — Time-Gated Decryption Binary");
+// Print project title at build time (moved into main)
+
 use std::io::Write;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -12,6 +12,7 @@ use sha3::{Digest, Sha3_256};
 use std::process::Command;
 
 use std::time::UNIX_EPOCH;
+use zeroize::Zeroize;
 
 
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
@@ -207,6 +208,8 @@ fn xor32(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 }
 
 fn main() {
+    // Print project title at build time
+    println!("hello_old — Time-Gated Decryption Binary");
     println!("cargo:rerun-if-changed=shared.rs");
     println!("cargo:rerun-if-changed=read.txt");
     println!("cargo:rerun-if-changed=src/serpent_siv.rs");
@@ -254,20 +257,14 @@ fn main() {
     let total_steps = 10;
     for step in 0..=total_steps {
         let percent = step * 100 / total_steps;
-        print!("\rEncrypting payload: [{0:>10$} {1}%", "#".repeat(step as usize), percent);
+        let bar = "#".repeat(step as usize);
+        print!("\rEncrypting payload: [{:<10}] {}%", bar, percent);
         std::io::stdout().flush().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     println!();
-    let plaintext_hash = sha3_256(&payload);
-    // Write the encrypted payload with metadata to output
-    write_blob(&out_dir, "payload.bin", &payload);
-    // Zeroize payload after writing
-    zeroize(&mut payload);
 
-    let mut rng = rand::rngs::OsRng;
-
-    // ---- KDF key (KEK) recovery path: RustyVM(master, kmaterial) -> k1||k2 ----
+    // Generate k1 and k2 first (needed for payload encryption)
     let mut k1 = [0u8; 32];
     let mut k2 = [0u8; 32];
     let mut rng_k = Rng::new(build_seed() ^ 0xA5A5);
@@ -275,10 +272,21 @@ fn main() {
     let mut rng_k2 = Rng::new(build_seed() ^ 0x5A5A);
     rng_k2.fill(&mut k2);
 
-    let inner = wrap_key(&k1, b"inner", &content);
-    // The original double-ChaCha payload is retained as defence-in-depth and is
-    // superseded by the Serpent-SIV payload below.
-    let _payload = wrap_key(&k2, b"payload", &inner);
+    // Double-wrap the payload for runtime: k1 then k2
+    let mut inner = wrap_key(&k1, b"inner", &payload);
+    let mut double_wrapped = wrap_key(&k2, b"payload", &inner);
+
+    let plaintext_hash = sha3_256(&payload);
+    // Write the encrypted payload with metadata to output
+    write_blob(&out_dir, "payload.bin", &double_wrapped);
+    // Zeroize payload after writing
+    zeroize(&mut payload);
+    zeroize(&mut inner);
+    zeroize(&mut double_wrapped);
+
+    let mut rng = rand::rngs::OsRng;
+
+    // ---- KDF key (KEK) recovery path: RustyVM(master, kmaterial) -> k1||k2 ----
     let mut kek = [0u8; 64];
     kek[..32].copy_from_slice(&k1);
     kek[32..].copy_from_slice(&k2);
