@@ -1,5 +1,6 @@
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
 const NTP_FRAC_SCALE: f64 = 4_294_967_296.0;
@@ -44,16 +45,27 @@ pub fn query(host: &str) -> Option<(f64, f64)> {
 }
 
 pub fn sync_all(hosts: &[&str]) -> Vec<(String, f64, f64)> {
+    let results: Arc<Mutex<Vec<(String, f64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
     for host in hosts {
         let host = host.to_string();
-        handles.push(std::thread::spawn(move || query(&host).map(|(n, d)| (host.clone(), n, d))));
+        let r = Arc::clone(&results);
+        handles.push(std::thread::spawn(move || {
+            if let Some((n, d)) = query(&host) {
+                r.lock().unwrap().push((host, n, d));
+            }
+        }));
     }
-    let mut out = Vec::new();
-    for h in handles {
-        if let Ok(Some(r)) = h.join() {
-            out.push(r);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let done = handles.iter().all(|h| h.is_finished());
+        if done || Instant::now() >= deadline {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    out
+    for h in handles {
+        drop(h);
+    }
+    results.lock().map(|g| g.clone()).unwrap_or_default()
 }

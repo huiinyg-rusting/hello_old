@@ -19,7 +19,7 @@ pub fn self_destruct() -> ! {
     }
 }
 
-fn tracer_pid() -> u32 {
+pub fn tracer_pid() -> u32 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("TracerPid:") {
@@ -47,7 +47,7 @@ pub fn start(expected_key_sha: [u8; 32], key_ptr: usize, key_len: usize) -> Arc<
     std::thread::spawn(move || {
         while RUNNING.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(400));
-            let stale = f.lock().unwrap().elapsed().as_secs() > 6;
+            let stale = f.lock().unwrap().elapsed().as_secs() > 15;
             let traced = tracer_pid() != 0;
             if stale || traced {
                 self_destruct();

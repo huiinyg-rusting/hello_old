@@ -149,7 +149,6 @@ fn gen_vm_program(k1: &[u8; 32], k2: &[u8; 32], km: &[u8; 64], seed: u64) -> Vec
         prog.push(0xF0);
         prog.push(half_idx as u8);
         prog.push(opaque_labels[half_idx * 32]);
-        prog.push(opaque_labels[half_idx * 32 + 1]);
     }
     
     prog.push(0x00);

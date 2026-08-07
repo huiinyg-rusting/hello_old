@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-pub const PASSWORD: &[u8] = b"1968";
+pub const PASSWORD: &[u8] = b"114514";
 pub const KEY_LEN: usize = 64;
 pub const OPEN_TIMESTAMP_UNIX_SECONDS: u64 = 1_755_000_000;
 pub const NTP_SERVERS: [&str; 5] = [

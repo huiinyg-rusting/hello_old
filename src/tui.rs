@@ -442,6 +442,9 @@ pub fn center_pad(line: &str, width: usize) -> usize {
 
 pub fn wait_for_quit(feed: &dyn Fn()) {
     let tty = io::stdin().is_terminal();
+    if !tty {
+        return;
+    }
     let orig = raw_on();
     loop {
         unsafe {
@@ -468,8 +471,6 @@ pub fn wait_for_quit(feed: &dyn Fn()) {
         }
         feed();
     }
-    if tty {
-        raw_off(&orig);
-    }
+    raw_off(&orig);
     show_cursor();
 }

@@ -22,7 +22,8 @@ A hardened Rust binary that embeds a secret text file and only reveals it after 
 ### Runtime Password
 - The binary prompts for a password at runtime with asterisk feedback (`*` characters).
 - The password is never embedded in the binary.
-- Build-time password is defined as `pub const PASSWORD` in `shared.rs` (default: `OpenThePodBayDoors_HAL9000_1968`).
+- Build-time password is defined as `pub const PASSWORD` in `shared.rs` (default: `114514`).
+- A wrong password is rejected and the program re-prompts; the process only burns when tampering is detected.
 
 ### NTP Time Verification
 - Concurrently queries 5 public NTP servers (`ntp.aliyun.com`, `ntp.myhuaweicloud.com`, `time.cloudflare.com`, `time.windows.com`, `ntp.ntsc.ac.cn`).
@@ -96,7 +97,7 @@ The binary is at `target/x86_64-unknown-linux-musl/release/hello_old`.
 Or pipe the password (for automation):
 
 ```bash
-printf '%s\n' 'OpenThePodBayDoors_HAL9000_1968' | ./hello_old
+printf '%s\n' '114514' | ./hello_old
 ```
 
 ## Requirements

@@ -11,7 +11,7 @@ mod signal;
 mod tui;
 mod watchdog;
 
-use std::io::{Write};
+use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -157,10 +157,10 @@ fn key_copy64(buf: &SecBuf) -> [u8; 64] {
 fn noop() {}
 
 fn anti_debug_checks() -> bool {
+    if watchdog::tracer_pid() != 0 {
+        return false;
+    }
     unsafe {
-        if libc::ptrace(libc::PTRACE_TRACEME, 0, 1, 0) == -1 {
-            return false;
-        }
         if libc::prctl(libc::PR_SET_PTRACER, 0, 0, 0, 0) == -1 {
         }
     }
@@ -233,16 +233,10 @@ fn success_sequence(feed: &dyn Fn()) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let test_password = args.iter().find(|a| a == "--password").and_then(|_| args.iter().skip_while(|a| a != "--password").nth(1));
-    let skip_ntp = args.iter().any(|a| a == "--skip-ntp");
-    let skip_anti_debug = args.iter().any(|a| a == "--skip-anti-debug");
-    let auto_quit = args.iter().any(|a| a == "--auto-quit");
-
-    if !skip_anti_debug && !anti_debug_checks() {
+    if !anti_debug_checks() {
         std::process::exit(137);
     }
-    
+
     signal::ignore();
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
@@ -280,41 +274,44 @@ fn main() {
     let date_label = format!("Door opens on {}", open_date);
     tui::dynamic_center_message(&date_label, C_YELLOW, &noop);
 
-    let password = if let Some(p) = test_password {
-        p.as_bytes().to_vec()
-    } else {
-        let prompt = "Enter decryption password:";
-        let mut password;
+    let prompt = "Enter decryption password:";
+    let mut prog;
+    loop {
         tui::dynamic_center_prompt(prompt, &noop);
-    
-        loop {
-            match pass::read_password() {
-                Some(p) if !p.is_empty() => {
-                    password = p;
-                    break;
+        let mut password = match pass::read_password() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                if !std::io::stdin().is_terminal() {
+                    watchdog::self_destruct();
                 }
-                _ => {
-                    tui::dynamic_center_error("Invalid password, try again", &noop);
-                    tui::dynamic_center_prompt(prompt, &noop);
+                tui::dynamic_center_error("Invalid password, try again", &noop);
+                continue;
+            }
+        };
+
+        let mut master_key = crypto::argon2id_hash(&password, SALT);
+        zeroize(password.as_mut_slice());
+
+        let mut boot = concat3(&master_key, b"bootstrap", b"");
+        let mut bk = crypto::sha3_256(&boot);
+        zeroize(&mut boot);
+        zeroize(&mut master_key);
+
+        match crypto::decrypt(&bk, VM_PROG_BLOB) {
+            Some(p) => {
+                zeroize(&mut bk);
+                prog = p;
+                break;
+            }
+            None => {
+                zeroize(&mut bk);
+                if !std::io::stdin().is_terminal() {
+                    watchdog::self_destruct();
                 }
+                tui::dynamic_center_error("Invalid password, try again", &noop);
             }
         }
-        password
-    };
-
-    let mut master_key = crypto::argon2id_hash(&password, SALT);
-    zeroize(password.as_mut_slice());
-    
-    let mut boot = concat3(&master_key, b"bootstrap", b"");
-    let mut bk = crypto::sha3_256(&boot);
-    zeroize(&mut boot);
-    zeroize(&mut master_key);
-    
-    let mut prog = match crypto::decrypt(&bk, VM_PROG_BLOB) {
-        Some(p) => p,
-        None => watchdog::self_destruct(),
-    };
-    zeroize(&mut bk);
+    }
     let mut keys = [0u8; shared::KEY_LEN];
     if !rustyvm::run(&prog, KM, &mut keys) {
         watchdog::self_destruct();
@@ -348,6 +345,9 @@ fn main() {
         );
     }
 
+    beat();
+    let mut report: Vec<String> = Vec::new();
+
     let local_now = ntp::unix_now_u64();
     let (local_year, _, _) = civil_from_days((local_now / 86400) as i64);
     if !(2020..=2100).contains(&local_year) {
@@ -357,46 +357,32 @@ fn main() {
         );
     }
 
-    beat();
-    let (ntp_now, ntp_drift) = if skip_ntp {
-        (local_now as f64, 0.0)
-    } else {
-        let results = ntp::sync_all(&shared::NTP_SERVERS);
-        let mut report: Vec<String> = Vec::new();
     report.push(format!("Local time    {}", format_unix(local_now)));
-    let results = if skip_ntp {
-        vec![]
-    } else {
-        ntp::sync_all(&shared::NTP_SERVERS)
-    };
 
-    let (ntp_now, ntp_drift) = if skip_ntp {
-        (local_now as f64, 0.0)
-    } else {
-        match consensus(&results) {
-            Some((n, d)) => (n, d),
-            None => {
-                let custom_prompt = "All NTP servers unreachable. Enter custom NTP host:";
-                let cpad = tui::center_pad(custom_prompt, width);
-                tui::cursor(height / 2, cpad + 1);
-                print!("{}{}{}", C_CYAN, custom_prompt, C_RESET);
-                tui::flush();
-                let mut line = String::new();
-                let _ = std::io::stdin().read_line(&mut line);
-                let host = line.trim().to_string();
-                match ntp::query(&host) {
-                    Some((n, d)) if d.abs() < shared::CLOCK_DRIFT_LIMIT_SECONDS => (n, d),
-                    Some((_, d)) => {
-                        refuse(
-                            &[(format!("Custom NTP drift {:.1}s", d)), "Access denied".to_string()],
-                            &beat,
-                        );
-                    }
-                    None => refuse(
-                        &["Custom NTP verification failed".to_string(), "Access denied".to_string()],
+    let results = ntp::sync_all(&shared::NTP_SERVERS);
+    let (ntp_now, ntp_drift) = match consensus(&results) {
+        Some((n, d)) => (n, d),
+        None => {
+            let custom_prompt = "All NTP servers unreachable. Enter custom NTP host:";
+            let cpad = tui::center_pad(custom_prompt, width);
+            tui::cursor(height / 2, cpad + 1);
+            print!("{}{}{}", C_CYAN, custom_prompt, C_RESET);
+            tui::flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            let host = line.trim().to_string();
+            match ntp::query(&host) {
+                Some((n, d)) if d.abs() < shared::CLOCK_DRIFT_LIMIT_SECONDS => (n, d),
+                Some((_, d)) => {
+                    refuse(
+                        &[(format!("Custom NTP drift {:.1}s", d)), "Access denied".to_string()],
                         &beat,
-                    ),
+                    );
                 }
+                None => refuse(
+                    &["Custom NTP verification failed".to_string(), "Access denied".to_string()],
+                    &beat,
+                ),
             }
         }
     };
@@ -415,11 +401,9 @@ fn main() {
         seccomp::rule_count()
     ));
 
-    if !skip_ntp {
-        let hacker_lines = hacker_ntp_report(&results);
-        for line in hacker_lines {
-            report.push(line);
-        }
+    let hacker_lines = hacker_ntp_report(&results);
+    for line in hacker_lines {
+        report.push(line);
     }
     report.push(String::new());
 
@@ -504,17 +488,14 @@ fn main() {
     let rows0 = tui::show(&all, &beat, &unlock_time);
     let width = tui::term_width();
 
-    if auto_quit {
-        tui::sleep(500);
-    } else {
-        let hint = "Press q to burn and exit";
-        let hr = rows0 + 1;
-        let hpad = tui::center_pad(hint, width);
-        tui::hide_cursor();
-        print!("\x1b[{};{}H\x1b[2m{}\x1b[0m", hr, 1, format!("{}{}", " ".repeat(hpad), hint));
-        flush_stdout();
-        tui::wait_for_quit(&beat);
-    }
+    let hint = "Press q to burn and exit";
+    let hr = rows0 + 1;
+    let hpad = tui::center_pad(hint, width);
+    tui::hide_cursor();
+    print!("\x1b[{};{}H\x1b[2m{}\x1b[0m", hr, 1, format!("{}{}", " ".repeat(hpad), hint));
+    flush_stdout();
+    tui::wait_for_quit(&beat);
+
     watchdog::stop();
     let height = tui::term_height();
     tui::burn_with_progress(width, height, &beat);
