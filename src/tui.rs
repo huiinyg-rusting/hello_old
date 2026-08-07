@@ -12,7 +12,6 @@ pub const C_CYAN: &str = "\x1b[36m";
 pub const C_RED: &str = "\x1b[31m";
 pub const C_BG_DARK: &str = "\x1b[48;5;234m";
 pub const C_BG_BLACK: &str = "\x1b[40m";
-pub const C_BG_RED: &str = "\x1b[41m";
 
 pub struct Rng(u64);
 
@@ -90,7 +89,25 @@ fn char_width(c: char) -> usize {
 }
 
 fn display_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    let mut w = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(n) = chars.next() {
+                if n == '[' {
+                    for c2 in chars.by_ref() {
+                        let b = c2 as u32;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            w += char_width(c);
+        }
+    }
+    w
 }
 
 pub fn sleep(ms: u64) {
@@ -138,7 +155,7 @@ fn scanline_effect(width: usize, height: usize, rng: &mut Rng, feed: &dyn Fn()) 
         cursor(r, 1);
         print!("{}{}{}{}", C_BG_DARK, C_GREEN, g, C_RESET);
         flush();
-        sleep(3);
+        sleep(12);
         feed();
     }
     for r in (1..=height).rev() {
@@ -146,7 +163,7 @@ fn scanline_effect(width: usize, height: usize, rng: &mut Rng, feed: &dyn Fn()) 
         cursor(r, 1);
         print!("{}{}{}{}", C_BG_DARK, C_DIM, g, C_RESET);
         flush();
-        sleep(2);
+        sleep(8);
         feed();
     }
 }
@@ -161,7 +178,7 @@ fn reveal_row_fast(row: usize, line: &str, width: usize, height: usize, unlock_t
         revealed.push(ch);
         shown_w += char_width(ch);
         let remain_w = width.saturating_sub(pad + shown_w);
-        let g = rng.fill_line(remain_w.min(60));
+        let g = rng.fill_line(remain_w);
         cursor(row, 1);
         print!(
             "{}{}{}{}{}{}{}{}",
@@ -169,18 +186,28 @@ fn reveal_row_fast(row: usize, line: &str, width: usize, height: usize, unlock_t
         );
         draw_status_bar(width, height, unlock_time);
         flush();
-        sleep(2);
-        if i % 4 == 0 {
+        sleep(6);
+        if i % 3 == 0 {
             feed();
         }
     }
     cursor(row, 1);
     print!("{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(pad), C_GREEN);
     print!("{}", line);
-    print!("{}{}", C_RESET, " ".repeat(width.saturating_sub(pad + display_width(line))));
+    print!("{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + display_width(line))));
     draw_status_bar(width, height, unlock_time);
     flush();
-    sleep(10);
+
+    cursor(row, 1);
+    print!("{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(pad), C_BRIGHT_WHITE, line, C_BG_DARK, " ".repeat(width.saturating_sub(pad + display_width(line))));
+    flush();
+    sleep(35);
+    cursor(row, 1);
+    print!("{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(pad), C_GREEN);
+    print!("{}", line);
+    print!("{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + display_width(line))));
+    flush();
+    sleep(18);
     feed();
 }
 
@@ -205,7 +232,7 @@ fn draw_progress_bars_all(width: usize, height: usize, measures: &[(&str, f32)],
         let row = start_row + i;
         cursor(row, 1);
         
-        let bar_w = width.saturating_sub(label.len() + 12);
+        let bar_w = width.saturating_sub(label.len() + 13);
         let prog = if i < current_idx {
             *target
         } else if i == current_idx {
@@ -219,10 +246,12 @@ fn draw_progress_bars_all(width: usize, height: usize, measures: &[(&str, f32)],
         
         let color = if i < current_idx { C_GREEN } else if i == current_idx { C_YELLOW } else { C_DIM };
         
-        print!("{}{}{:>2} {}{} [{}{}{}] {:>5.1}%{}", 
+        print!("{}{}{:>2} {}{} [{}{}{}] {:>5.1}%", 
             C_BG_DARK, C_CYAN, i + 1, label, C_RESET,
-            color, "█".repeat(filled), "░".repeat(empty), pct, C_RESET
+            color, "█".repeat(filled), "░".repeat(empty), pct
         );
+        let tail = width.saturating_sub(display_width(label) + bar_w + 13);
+        print!("{}{}{}", C_BG_DARK, " ".repeat(tail), C_RESET);
     }
     flush();
     feed();
@@ -237,7 +266,7 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     let mut rng = Rng::new();
 
     fill_bg_full(width, height);
-    fullscreen_garble(width, height, 3, 5, &mut rng, feed);
+    fullscreen_garble(width, height, 6, 25, &mut rng, feed);
     scanline_effect(width, height, &mut rng, feed);
 
     fill_bg_full(width, height);
@@ -278,36 +307,82 @@ pub fn burn_with_progress(width: usize, height: usize, feed: &dyn Fn()) {
     ];
     
     let mut rng = Rng::new();
-    
-    for pass in 0..5 {
-        for r in 1..=height {
-            let g = if pass % 2 == 0 {
-                rng.fill_line(width)
-            } else {
-                " ".repeat(width)
-            };
-            cursor(r, 1);
-            print!("{}{}{}{}", C_BG_RED, C_RED, g, C_RESET);
-        }
-        flush();
-        sleep(10);
-        feed();
-    }
-    
+
+    // Phase 1: garble-typed warning line
+    let msg = "INITIATING SELF-DESTRUCT SEQUENCE";
+    let row = height / 2;
+    let pad = center_pad(msg, width);
+    let chars: Vec<char> = msg.chars().collect();
     fill_bg_full(width, height);
     draw_status_bar(width, height, "BURNING...");
-    
+    for (i, _) in chars.iter().enumerate() {
+        for _ in 0..2 {
+            cursor(row, 1);
+            let left_g = rng.fill_line(pad);
+            let right_g = rng.fill_line(width.saturating_sub(pad + display_width(msg)));
+            let mut line = String::new();
+            for (j, &c) in chars.iter().enumerate() {
+                if j < i {
+                    line.push(c);
+                } else {
+                    line.push(rng.glyph());
+                }
+            }
+            print!("{}{}{}{}{}", C_BG_DARK, C_DIM, left_g, C_RED, line);
+            print!("{}{}{}", C_BG_DARK, C_DIM, right_g);
+            flush();
+            sleep(30);
+            feed();
+        }
+    }
+    cursor(row, 1);
+    print!("{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(pad), C_RED);
+    print!("{}", msg);
+    print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + display_width(msg))), C_RESET);
+    flush();
+
+    // Phase 2: blinking cursor ~2s
+    let blink_row = row + 2;
+    for _ in 0..10 {
+        cursor(blink_row, 1);
+        let bp = center_pad("█", width);
+        print!("{}{}{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(bp), C_YELLOW, "█", C_BG_DARK);
+        print!("{}", " ".repeat(width.saturating_sub(bp + 1)));
+        flush();
+        sleep(110);
+        cursor(blink_row, 1);
+        print!("{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(bp), " ");
+        print!("{}", " ".repeat(width.saturating_sub(bp + 1)));
+        flush();
+        sleep(90);
+        feed();
+    }
+
+    // Phase 3: progress bars
+    fill_bg_full(width, height);
+    draw_status_bar(width, height, "BURNING...");
     for i in (0..measures.len()).rev() {
         for step in 0..=5 {
             let prog = 1.0 - (step as f32 / 5.0);
             draw_progress_bars_all(width, height, &measures, i, prog, feed);
-            sleep(10);
+            sleep(80);
         }
     }
-    
     draw_progress_bars_all(width, height, &measures, 0, 0.0, feed);
-    sleep(50);
-    
+    sleep(300);
+
+    // Phase 4: garble flicker
+    for _ in 0..3 {
+        for r in 1..=height {
+            let g = rng.fill_line(width);
+            cursor(r, 1);
+            print!("{}{}{}{}", C_BG_DARK, C_RED, g, C_RESET);
+        }
+        flush();
+        sleep(45);
+        feed();
+    }
+
     clear();
     show_cursor();
 }
@@ -324,21 +399,21 @@ pub fn dynamic_center_prompt(prompt: &str, feed: &dyn Fn()) {
     fill_bg_full(width, height);
     draw_status_bar(width, height, "AWAITING PASSWORD");
     
-    for _ in 0..5 {
+    for _ in 0..10 {
         cursor(row, 1);
         let left_garble = rng.fill_line(pad);
         let right_garble = rng.fill_line(width.saturating_sub(pad + prompt_w + 4));
         print!("{}{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_garble, C_CYAN, "  ", prompt, "  ", C_RESET);
         print!("{}{}{}", C_BG_DARK, C_DIM, right_garble);
         flush();
-        sleep(10);
+        sleep(45);
         feed();
     }
     
     cursor(row, 1);
     let left_pad = " ".repeat(pad);
     print!("{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_pad, C_CYAN, "  ", prompt, "  ");
-    print!("{}{}", C_RESET, " ".repeat(width.saturating_sub(pad + prompt_w + 4)));
+    print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + prompt_w + 4)), C_RESET);
     draw_status_bar(width, height, "AWAITING PASSWORD");
     flush();
 }
@@ -352,23 +427,38 @@ pub fn dynamic_center_error(msg: &str, feed: &dyn Fn()) {
     
     let mut rng = Rng::new();
     
-    for _ in 0..3 {
+    for _ in 0..7 {
         cursor(row, 1);
         let left_garble = rng.fill_line(pad);
         let right_garble = rng.fill_line(width.saturating_sub(pad + msg_w + 4));
         print!("{}{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_garble, C_RED, "  ", msg, "  ", C_RESET);
         print!("{}{}{}", C_BG_DARK, C_DIM, right_garble);
         flush();
-        sleep(10);
+        sleep(40);
+        feed();
+    }
+    
+    for _ in 0..4 {
+        cursor(row, 1);
+        let left_pad = " ".repeat(pad);
+        print!("{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_pad, C_RED, "  ", msg, "  ");
+        print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + msg_w + 4)), C_RESET);
+        flush();
+        sleep(200);
+        cursor(row, 1);
+        print!("{}{}{}{}{}{}{}", C_BG_DARK, C_BRIGHT_WHITE, left_pad, C_RED, "  ", msg, "  ");
+        print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + msg_w + 4)), C_RESET);
+        flush();
+        sleep(200);
         feed();
     }
     
     cursor(row, 1);
     let left_pad = " ".repeat(pad);
     print!("{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_pad, C_RED, "  ", msg, "  ");
-    print!("{}{}", C_RESET, " ".repeat(width.saturating_sub(pad + msg_w + 4)));
+    print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + msg_w + 4)), C_RESET);
     flush();
-    sleep(100);
+    sleep(300);
 }
 
 pub fn dynamic_center_message(msg: &str, color: &str, feed: &dyn Fn()) {
@@ -383,23 +473,108 @@ pub fn dynamic_center_message(msg: &str, color: &str, feed: &dyn Fn()) {
     fill_bg_full(width, height);
     draw_status_bar(width, height, "PROCESSING...");
     
-    for _ in 0..3 {
+    for _ in 0..6 {
         cursor(row, 1);
         let left_garble = rng.fill_line(pad);
         let right_garble = rng.fill_line(width.saturating_sub(pad + msg_w + 4));
         print!("{}{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_garble, color, "  ", msg, "  ", C_RESET);
         print!("{}{}{}", C_BG_DARK, C_DIM, right_garble);
         flush();
-        sleep(10);
+        sleep(35);
         feed();
     }
     
     cursor(row, 1);
     let left_pad = " ".repeat(pad);
     print!("{}{}{}{}{}{}{}", C_BG_DARK, C_DIM, left_pad, color, "  ", msg, "  ");
-    print!("{}{}", C_RESET, " ".repeat(width.saturating_sub(pad + msg_w + 4)));
+    print!("{}{}{}", C_BG_DARK, " ".repeat(width.saturating_sub(pad + msg_w + 4)), C_RESET);
     draw_status_bar(width, height, "PROCESSING...");
     flush();
+}
+
+pub struct DecryptFx {
+    width: usize,
+    height: usize,
+    stages: Vec<String>,
+    current: usize,
+}
+
+impl DecryptFx {
+    pub fn new(width: usize, height: usize, stages: &[&str]) -> Self {
+        DecryptFx {
+            width,
+            height,
+            stages: stages.iter().map(|s| s.to_string()).collect(),
+            current: 0,
+        }
+    }
+
+    pub fn draw(&self, active: f32, feed: &dyn Fn()) {
+        let w = self.width;
+        let h = self.height;
+        let n = self.stages.len();
+        let panel_h = n + 4;
+        let start = h.saturating_sub(panel_h) / 2 + 1;
+
+        let mut rng = Rng::new();
+
+        let title = "█ DECRYPTION SEQUENCE █";
+        let title_w = display_width(title);
+        let tpad = center_pad(title, w);
+        cursor(start - 2, 1);
+        print!("{}{}{}{}", C_BG_DARK, C_DIM, rng.fill_line(w), C_RESET);
+        cursor(start - 1, 1);
+        print!("{}{}{}{}{}{}", C_BG_DARK, C_CYAN, " ".repeat(tpad), title, " ".repeat(w.saturating_sub(tpad + title_w)), C_RESET);
+
+        for (i, label) in self.stages.iter().enumerate() {
+            let row = start + i;
+            cursor(row, 1);
+            let (marker, color) = if i < self.current {
+                ("✓", C_GREEN)
+            } else if i == self.current {
+                ("▶", C_YELLOW)
+            } else {
+                (" ", C_DIM)
+            };
+            let mut line = format!(" {} [{:02}] {}", marker, i + 1, label);
+            if i < self.current {
+                line.push_str("  DONE");
+            } else if i == self.current {
+                let bw: usize = 14;
+                let filled = ((bw as f32) * active.clamp(0.0, 1.0)) as usize;
+                line.push_str(&format!("  [{}]", "█".repeat(filled) + &"░".repeat(bw.saturating_sub(filled))));
+                if (rng.next_u64() % 3) == 0 {
+                    line.push(' ');
+                    line.push(rng.glyph());
+                }
+            }
+            let remain = w.saturating_sub(display_width(&line));
+            print!("{}{}{}{}", C_BG_DARK, color, line, " ".repeat(remain));
+        }
+
+        let bottom = start + n;
+        cursor(bottom, 1);
+        print!("{}{}{}{}", C_BG_DARK, C_CYAN, "═".repeat(w), C_RESET);
+        cursor(bottom + 1, 1);
+        print!("{}{}{}{}", C_BG_DARK, C_DIM, rng.fill_line(w), C_RESET);
+
+        draw_status_bar(w, h, "PROCESSING...");
+        flush();
+        feed();
+    }
+
+    pub fn advance(&mut self) {
+        if self.current < self.stages.len() {
+            self.current += 1;
+        }
+    }
+
+    pub fn finish(&self, feed: &dyn Fn()) {
+        sleep(150);
+        clear();
+        flush();
+        feed();
+    }
 }
 
 pub fn hide_cursor() {

@@ -218,14 +218,14 @@ fn success_sequence(feed: &dyn Fn()) {
     
     tui::clear();
     
-    for _ in 0..8 {
+    for _ in 0..12 {
         for r in 1..=height {
             let g = rng.fill_line(width);
             tui::cursor(r, 1);
             print!("{}{}{}", C_GREEN, g, C_RESET);
         }
         tui::flush();
-        tui::sleep(20);
+        tui::sleep(30);
         feed();
     }
     
@@ -313,6 +313,24 @@ fn main() {
         }
     }
     let mut keys = [0u8; shared::KEY_LEN];
+
+    const DECRYPT_STAGES: [&str; 6] = [
+        "Verifying key derivation",
+        "Executing VM bootstrap",
+        "Hardening memory & watchdog",
+        "Querying NTP servers",
+        "Computing time consensus",
+        "Releasing payload",
+    ];
+    let mut fx = tui::DecryptFx::new(width, height, &DECRYPT_STAGES);
+
+    for i in 0..6 {
+        fx.draw(i as f32 / 5.0, &noop);
+        tui::sleep(35);
+    }
+    fx.advance();
+
+    fx.draw(0.0, &noop);
     if !rustyvm::run(&prog, KM, &mut keys) {
         watchdog::self_destruct();
     }
@@ -321,6 +339,11 @@ fn main() {
         std::ptr::copy_nonoverlapping(keys.as_ptr(), key_buf.ptr, shared::KEY_LEN);
     }
     zeroize(&mut keys);
+    for i in 0..5 {
+        fx.draw(0.3 + i as f32 * 0.14, &noop);
+        tui::sleep(35);
+    }
+    fx.advance();
 
     let key_sha = crypto::sha3_256(&key_copy64(&key_buf));
     let feed: Arc<Mutex<Instant>> = watchdog::start(key_sha, key_buf.ptr as usize, 64);
@@ -329,6 +352,7 @@ fn main() {
         *feed.lock().unwrap() = Instant::now();
     };
     beat();
+    fx.draw(0.25, &beat);
 
     let anchor = harden::ClockAnchor::new();
     if !anchor.sane() {
@@ -337,6 +361,7 @@ fn main() {
             &beat,
         );
     }
+    fx.draw(0.5, &beat);
 
     if !seccomp::install() {
         refuse(
@@ -344,9 +369,7 @@ fn main() {
             &beat,
         );
     }
-
-    beat();
-    let mut report: Vec<String> = Vec::new();
+    fx.draw(0.7, &beat);
 
     let local_now = ntp::unix_now_u64();
     let (local_year, _, _) = civil_from_days((local_now / 86400) as i64);
@@ -356,10 +379,23 @@ fn main() {
             &beat,
         );
     }
+    for i in 0..3 {
+        fx.draw(0.8 + i as f32 * 0.07, &beat);
+        tui::sleep(30);
+    }
+    fx.advance();
 
+    fx.draw(0.0, &beat);
+    let mut report: Vec<String> = Vec::new();
     report.push(format!("Local time    {}", format_unix(local_now)));
 
-    let results = ntp::sync_all(&shared::NTP_SERVERS);
+    let results = ntp::sync_all(&shared::NTP_SERVERS, &mut |done, total| {
+        let a = if total > 0 { done as f32 / total as f32 } else { 1.0 };
+        fx.draw(a, &beat);
+    });
+    fx.advance();
+
+    fx.draw(0.0, &beat);
     let (ntp_now, ntp_drift) = match consensus(&results) {
         Some((n, d)) => (n, d),
         None => {
@@ -386,6 +422,11 @@ fn main() {
             }
         }
     };
+    for i in 0..4 {
+        fx.draw(0.5 + i as f32 * 0.12, &beat);
+        tui::sleep(30);
+    }
+    fx.advance();
 
     if !anchor.sane() {
         refuse(
@@ -407,6 +448,7 @@ fn main() {
     }
     report.push(String::new());
 
+    fx.draw(0.0, &beat);
     beat();
     let mut k1 = [0u8; 32];
     let mut k2 = [0u8; 32];
@@ -451,6 +493,10 @@ fn main() {
         lines.push("Time has not yet arrived".to_string());
         refuse(&lines, &beat);
     }
+    for i in 0..4 {
+        fx.draw(0.55 + i as f32 * 0.1, &beat);
+        tui::sleep(35);
+    }
 
     beat();
     let mut content = {
@@ -473,6 +519,11 @@ fn main() {
     let content_len = content.len();
     crypto::zeroize(content.as_mut_slice());
     drop(content);
+    for i in 0..4 {
+        fx.draw(0.6 + i as f32 * 0.1, &beat);
+        tui::sleep(40);
+    }
+    fx.finish(&beat);
 
     success_sequence(&beat);
 
@@ -492,7 +543,14 @@ fn main() {
     let hr = rows0 + 1;
     let hpad = tui::center_pad(hint, width);
     tui::hide_cursor();
-    print!("\x1b[{};{}H\x1b[2m{}\x1b[0m", hr, 1, format!("{}{}", " ".repeat(hpad), hint));
+    print!(
+        "\x1b[{};{}H{}{}{}{}{}",
+        hr, 1,
+        C_BG_DARK, "\x1b[2m",
+        format!("{}{}", " ".repeat(hpad), hint),
+        " ".repeat(width.saturating_sub(hpad + hint.len())),
+        C_RESET
+    );
     flush_stdout();
     tui::wait_for_quit(&beat);
 
@@ -515,4 +573,4 @@ fn flush_stdout() {
     let _ = std::io::stdout().flush();
 }
 
-use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE};
+use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE, C_BG_DARK};

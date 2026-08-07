@@ -44,7 +44,7 @@ pub fn query(host: &str) -> Option<(f64, f64)> {
     Some((server_now, drift))
 }
 
-pub fn sync_all(hosts: &[&str]) -> Vec<(String, f64, f64)> {
+pub fn sync_all(hosts: &[&str], on_poll: &mut dyn FnMut(usize, usize)) -> Vec<(String, f64, f64)> {
     let results: Arc<Mutex<Vec<(String, f64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
     for host in hosts {
@@ -56,13 +56,15 @@ pub fn sync_all(hosts: &[&str]) -> Vec<(String, f64, f64)> {
             }
         }));
     }
+    let total = handles.len();
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
-        let done = handles.iter().all(|h| h.is_finished());
-        if done || Instant::now() >= deadline {
+        let done = handles.iter().filter(|h| h.is_finished()).count();
+        on_poll(done, total);
+        if done == total || Instant::now() >= deadline {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     for h in handles {
         drop(h);

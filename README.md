@@ -28,6 +28,7 @@ A hardened Rust binary that embeds a secret text file and only reveals it after 
 ### NTP Time Verification
 - Concurrently queries 5 public NTP servers (`ntp.aliyun.com`, `ntp.myhuaweicloud.com`, `time.cloudflare.com`, `time.windows.com`, `ntp.ntsc.ac.cn`).
 - Takes the median of servers within a 10-second drift tolerance.
+- The query is bounded by a 4-second deadline so a slow network can never stall the flow.
 - If all public NTP servers fail, prompts the user to enter a custom NTP server address.
 - Compares NTP time against the local clock and rejects if drift exceeds the limit.
 
@@ -37,7 +38,7 @@ A hardened Rust binary that embeds a secret text file and only reveals it after 
 
 ### Watchdog Self-Destruct
 - A background thread checks every 400ms:
-  - **Stale heartbeat**: if the main thread hasn't updated the heartbeat for 6 seconds, SIGKILL.
+  - **Stale heartbeat**: if the main thread hasn't updated the heartbeat for 15 seconds, SIGKILL.
   - **Tracer detection**: if `/proc/self/status` shows a non-zero `TracerPid`, SIGKILL.
   - **Key hash mismatch**: if the key material in memory has been tampered with, SIGKILL.
   - **Binary tampering**: if `/proc/self/exe` hash changes from the baseline, SIGKILL.
@@ -57,15 +58,26 @@ A hardened Rust binary that embeds a secret text file and only reveals it after 
 - Only `SIGKILL` (from the watchdog) can terminate the process.
 
 ### Anti-Debug / Anti-Tamper
+- `TracerPid` is checked at startup; a process already under a debugger is refused before the password prompt.
 - `PR_SET_DUMPABLE` is disabled (prevents core dumps).
 - `PR_SET_PTRACER` is set to 0 (prevents ptrace attachment).
+- A timing check aborts if a trivial operation takes suspiciously long (debugger/slow emulation).
 - `/proc/self/maps` is scanned for `LD_PRELOAD` and `LD_LIBRARY_PATH` injection.
 - RWX (writable + executable) memory regions are detected and trigger self-destruction.
 
-### TUI (Terminal User Interface)
-- Garbled text animation reveals the content character by character.
-- After reveal, the user can press `q` to trigger the burn animation and exit.
-- On EOF (piped input), the burn animation plays automatically.
+### Decryption Sequence TUI
+- After a correct password, a full-screen `█ DECRYPTION SEQUENCE █` panel runs six stages with a live progress bar and ambient garble (key derivation → VM bootstrap → hardening → NTP → consensus → payload release).
+
+### Reveal TUI
+- Garbled text reveals the content character by character with a "settle" flash on each line.
+- Entrance effects (full-screen garble, scanline sweep, status bar) play at a deliberate, ceremonial pace.
+
+### Burn (Self-Destruct) TUI
+- Press `q` (or EOF on piped input) to trigger the burn:
+  1. A warning line (`INITIATING SELF-DESTRUCT SEQUENCE`) is typed out through garble.
+  2. A block cursor blinks for ~2 seconds.
+  3. Seven progress bars run: key wipe → payload zeroing → guard pages → watchdog stop → seccomp removal → binary delete → clean exit.
+  4. A final red garble flicker, then the screen clears.
 - After the burn animation, the binary deletes itself from disk.
 
 ## Build
