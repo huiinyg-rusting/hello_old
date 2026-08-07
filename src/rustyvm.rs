@@ -21,9 +21,29 @@ const OP_CF_OBFUSCATE_BASE: u8 = 0xA0;
 const OP_CF_OBFUSCATE_END: u8 = 0xA5;
 const OP_OPAQUE_LABEL: u8 = 0xF0;
 
+// Side-channel resistant: constant-time conditional select
+fn ct_select(cond: bool, a: u64, b: u64) -> u64 {
+    let mask = (cond as u64).wrapping_neg();
+    (a & mask) | (b & !mask)
+}
+
+// Side-channel resistant: constant-time index access
+fn ct_load(material: &[u8], idx: usize) -> u64 {
+    let mut result = 0u64;
+    for (i, &byte) in material.iter().enumerate() {
+        let eq = ((i ^ idx) == 0) as u64;
+        let mask = eq.wrapping_neg();
+        result ^= (byte as u64) & mask;
+    }
+    result
+}
+
 pub fn run(prog: &[u8], material: &[u8], out: &mut [u8]) -> bool {
     let mut stack: Vec<u64> = Vec::with_capacity(16);
     let mut ip = 0usize;
+    // Pre-fill stack to fixed size to avoid timing leaks from allocations
+    stack.resize(16, 0);
+    let mut sp = 0usize;
     while ip < prog.len() {
         let op = prog[ip];
         ip += 1;

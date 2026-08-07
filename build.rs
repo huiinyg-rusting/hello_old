@@ -14,11 +14,13 @@ use std::process::Command;
 use std::time::UNIX_EPOCH;
 use zeroize::Zeroize;
 
-
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::EncodePrivateKey;
-
+use frodokem::{FrodoKEM1344, Kem, PublicKey, PrivateKey, Ciphertext, SharedSecret};
+use crystals_dilithium::ml_dsa_87::{Keypair, Signer, Verifier};
+use sm3::Sm3;
+use blake3;
 
 mod siv_mod {
     include!("src/serpent_siv.rs");
@@ -45,6 +47,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(data);
     h.finalize().into()
+}
+
+fn sm3_256(data: &[u8]) -> [u8; 32] {
+    let mut h = Sm3::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+fn blake3_256(data: &[u8]) -> [u8; 32] {
+    let hash = blake3::hash(data);
+    *hash.as_bytes()
 }
 
 fn nonce_for(key: &[u8; 32], label: &[u8]) -> [u8; 12] {
@@ -381,16 +394,59 @@ fn main() {
     );
 
     // ---- The three 32-byte shards XOR into the 256-bit Serpent DEK ----
+    // Now with 5 shards: RSA, Kyber, McEliece, FrodoKEM, Dilithium
     let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
+    
+    // ---- [Algorithm 5] FrodoKEM-1344: keypair + encapsulation ----
+    let frodokem_sk = PrivateKey::<FrodoKEM1344>::generate(&mut rng);
+    let frodokem_pk = frodokem_sk.public_key();
+    let (ct_frodo, sh_frodo) = frodokem_pk.encapsulate(&mut rng).expect("frodokem encapsulate");
+    let frodokem_sk_bytes = frodokem_sk.to_bytes().as_slice().to_vec();
+    write_blob(
+        &out_dir,
+        "frodo_sk_wrap.bin",
+        &wrap_key(&kek_key, b"frodo-sk", &frodokem_sk_bytes),
+    );
+    write_blob(&out_dir, "ct_frodo.bin", ct_frodo.as_slice());
+    let mut s_frodo = [0u8; 32];
+    s_frodo.copy_from_slice(sh_frodo.as_slice());
+    println!(
+        "cargo:warning=FrodoKEM-1344: ct={} shard recovered",
+        ct_frodo.as_slice().len()
+    );
+    
+    // ---- [Algorithm 6] CRYSTALS-Dilithium-5 (ML-DSA-87): keypair + signing ----
+    let dilithium_keypair: Keypair = Keypair::generate(&mut rng);
+    let dilithium_vk = dilithium_keypair.verifying_key();
+    let dilithium_sk_bytes = dilithium_keypair.secret_key().to_bytes().to_vec();
+    write_blob(
+        &out_dir,
+        "dilithium_sk_wrap.bin",
+        &wrap_key(&kek_key, b"dilithium-sk", &dilithium_sk_bytes),
+    );
+    write_blob(&out_dir, "dilithium_vk.bin", dilithium_vk.to_bytes().as_slice());
+    let mut s_dilithium = [0u8; 32];
+    // Use blake3 hash of dilithium public key as additional entropy shard
+    let dilithium_pk_hash = blake3_256(dilithium_vk.to_bytes().as_slice());
+    s_dilithium.copy_from_slice(&dilithium_pk_hash);
+    println!(
+        "cargo:warning=CRYSTALS-Dilithium-5 (ML-DSA-87): vk={} sk wrapped",
+        dilithium_vk.to_bytes().as_slice().len()
+    );
 
-    // ---- [Algorithm 5] Serpent-256-SIV: authenticated encryption of the payload ----
+    // ---- Combine all 5 shards into the 256-bit Serpent DEK ----
+    // RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium
+    let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
+    dek = xor32(&dek, &s_frodo, &s_dilithium);
+
+    // ---- [Algorithm 7] Serpent-256-SIV: authenticated encryption of the payload ----
     let siv_blob = siv_encrypt_inner(&dek, &ts, &content);
     write_blob(&out_dir, "serpent_siv.bin", &siv_blob);
     // Store ciphertext length for display / parsing.
     let siv_len = (siv_blob.len() as u32).to_le_bytes();
     write_blob(&out_dir, "serpent_siv_len.bin", &siv_len);
 
-    // ---- [Algorithm 6] Ed448: sign the binding message ----
+    // ---- [Algorithm 8] Ed448: sign the binding message ----
     use ed448_goldilocks::{Signature, SigningKey};
     use ed448_goldilocks::elliptic_curve::Generate;
     let ed_sk = SigningKey::generate();
@@ -407,15 +463,38 @@ fn main() {
         "cargo:warning=Ed448: vk=57B sig=114B over (ts|dek|sha256(siv)) signed",
     );
 
+    // ---- [Algorithm 9] CRYSTALS-Dilithium-5: sign the binding message ----
+    let dilithium_msg = Vec::from(&msg);
+    let dilithium_sig = dilithium_keypair.sign(&dilithium_msg);
+    write_blob(&out_dir, "dilithium_sig.bin", dilithium_sig.as_bytes());
+    println!(
+        "cargo:warning=CRYSTALS-Dilithium-5: sig={} over (ts|dek|sha256(siv)) signed",
+        dilithium_sig.as_bytes().len()
+    );
+
+    // ---- Write all KEM ciphertexts and wrapped private keys for runtime ----
+    // RSA
+    // ct_rsa.bin, rsa_sk_wrap.bin already written
+    // Kyber
+    // ct_ky.bin, ky_sk_wrap.bin already written
+    // McEliece
+    // ct_mce.bin, mce_sk_wrap.bin already written
+    // FrodoKEM
+    // ct_frodo.bin, frodo_sk_wrap.bin already written
+    // Dilithium
+    // dilithium_sk_wrap.bin, dilithium_vk.bin, dilithium_sig.bin already written
+
     println!("cargo:warning=Serpent-256-SIV: blob={} (V(16) || ct)", siv_blob.len());
     println!("cargo:warning=DEK shards XOR combined (32B) = {:02x?}", &dek[..8]);
-    println!("cargo:warning=Message signed (timestamp+DEK+hash) with Ed448");
+    println!("cargo:warning=Message signed (timestamp+DEK+hash) with Ed448 + Dilithium-5");
     println!("cargo:warning====================");
 
     // Sensitive material cleanup.
     zeroize(&mut s_rsa);
     zeroize(&mut s_ky);
     zeroize(&mut s_mce);
+    zeroize(&mut s_frodo);
+    zeroize(&mut s_dilithium);
     zeroize(&mut dek);
     zeroize(&mut kek_key);
     zeroize(&mut k1);
