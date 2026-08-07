@@ -147,4 +147,36 @@ pub fn siv_encrypt(key32: &[u8], ad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     out
 }
 
+pub fn siv_decrypt(key32: &[u8], ad: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    if ciphertext.len() < B {
+        return None;
+    }
+    let k1 = &key32[..16];
+    let k2 = &key32[16..32];
+    let mut v = [0u8; B];
+    v.copy_from_slice(&ciphertext[..B]);
+    let ct = &ciphertext[B..];
+    let mut q = v;
+    ctr_mask(&mut q);
+    let mut counter = q;
+    let mut out: Vec<u8> = Vec::with_capacity(ct.len());
+    let mut i = 0;
+    while i < ct.len() {
+        let ek = serpent_enc_block(k2, &counter);
+        let mut j = 0;
+        let take = (B).min(ct.len() - i);
+        while j < take {
+            out.push(ct[i + j] ^ ek[j]);
+            j += 1;
+        }
+        inc128(&mut counter);
+        i += take;
+    }
+    let v_check = s2v(k1, &[ad], &out);
+    if v_check != v {
+        return None;
+    }
+    Some(out)
+}
+
 

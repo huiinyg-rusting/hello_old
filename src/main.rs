@@ -517,11 +517,11 @@ fn main() {
     beat();
     // Decrypt payload and extract embedded metadata
     let mut payload = {
-        let mut inner = match crypto::decrypt(&k1, PAYLOAD) {
+        let mut inner = match crypto::decrypt(&k2, PAYLOAD) {
             Some(c) => c,
             None => { log_self_destruct("main: decrypt PAYLOAD layer 1 failed"); watchdog::self_destruct(); }
         };
-        let out = match crypto::decrypt(&k2, &inner) {
+        let out = match crypto::decrypt(&k1, &inner) {
             Some(c) => c,
             None => { log_self_destruct("main: decrypt PAYLOAD layer 2 failed"); watchdog::self_destruct(); }
         };
