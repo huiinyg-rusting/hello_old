@@ -1,24 +1,22 @@
 use std::fs;
-// Print project title at build time (moved into main)
-
 use std::io::Write;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
+use hmac::Hmac;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::process::Command;
-
 use std::time::UNIX_EPOCH;
 use zeroize::Zeroize;
 
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::EncodePrivateKey;
-use frodokem::{FrodoKEM1344, Kem, PublicKey, PrivateKey, Ciphertext, SharedSecret};
-use crystals_dilithium::ml_dsa_87::{Keypair, Signer, Verifier};
+use frodo_kem::Algorithm as FrodoAlgorithm;
+use crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey, RandomMode};
 use sm3::Sm3;
 use blake3;
 
@@ -31,11 +29,39 @@ include!("shared.rs");
 
 const DEFAULT_PASSWORD: &[u8] = PASSWORD;
 const H1: usize = KEY_LEN / 2;
-const ARGON2_MEMORY_KIB: u32 = 1024;
-const ARGON2_ITERATIONS: u32 = 1;
-const ARGON2_PARALLELISM: u32 = 1;
+const ARGON2_MEMORY_KIB: u32 = 65536;
+const ARGON2_ITERATIONS: u32 = 3;
+const ARGON2_PARALLELISM: u32 = 4;
 const ARGON2_SALT_LEN: usize = 32;
 const ARGON2_OUTPUT_LEN: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
+    let mut hkdf = HmacSha256::new_from_slice(ikm).expect("HMAC key");
+    hkdf.update(salt);
+    hkdf.update(info);
+    let mut okm = vec![0u8; out_len];
+    hkdf.finalize_into(&mut okm);
+    okm
+}
+
+fn derive_wrapping_keys(master_key: &[u8; 32]) -> [[u8; 32]; 6] {
+    let labels = [
+        b"wrap-rsa",
+        b"wrap-kyber",
+        b"wrap-mceliece",
+        b"wrap-frodokem",
+        b"wrap-dilithium",
+        b"wrap-serpent-dek",
+    ];
+    let mut keys = [[0u8; 32]; 6];
+    for (i, label) in labels.iter().enumerate() {
+        let key = hkdf_sha256(master_key, b"hello-old-v1", label, 32);
+        keys[i].copy_from_slice(&key);
+    }
+    keys
+}
 
 fn sha3_256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -324,17 +350,20 @@ fn main() {
     zeroize(&mut bk);
 
     // The KEK (k1||k2) is the password-derived key that wraps every KEM secret key.
-    let mut kek_key: [u8; 32] = {
-        let mut kk = [0u8; 32];
-        kk.copy_from_slice(&kek[..32]);
-        kk
-    };
+    // Now using HKDF to derive 6 independent wrapping keys
+    let wrapping_keys = derive_wrapping_keys(&kek[..32].try_into().expect("kek slice"));
+    let rsa_wrap_key = wrapping_keys[0];
+    let kyber_wrap_key = wrapping_keys[1];
+    let mceliece_wrap_key = wrapping_keys[2];
+    let frodokem_wrap_key = wrapping_keys[3];
+    let dilithium_wrap_key = wrapping_keys[4];
+    let serpent_dek_wrap_key = wrapping_keys[5];
 
     println!("cargo:warning===== BUILD INFO ====");
     println!("cargo:warning=Plaintext chars: {}", content.len());
     println!("cargo:warning=Plaintext SHA-3-256: {}", hex(&plaintext_hash));
     println!(
-        "cargo:warning=Algorithms: Argon2id + RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + Serpent-256-SIV + Ed448ph + Seccomp-BPF"
+        "cargo:warning=Algorithms: Argon2id + RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344 + CRYSTALS-Dilithium-5 + Serpent-256-SIV + Ed448ph + SM3 + BLAKE3 + Seccomp-BPF"
     );
     println!("cargo:warning=KDF/KEK (Argon2id->RustyVM): {:02x?}", &kek[..8]);
     zeroize(&mut kek);
@@ -347,7 +376,7 @@ fn main() {
         .expect("rsa pkcs8 der")
         .as_bytes()
         .to_vec();
-    write_blob(&out_dir, "rsa_sk_wrap.bin", &wrap_key(&kek_key, b"rsa-sk", &rsa_der));
+    write_blob(&out_dir, "rsa_sk_wrap.bin", &wrap_key(&rsa_wrap_key, b"rsa-sk", &rsa_der));
 
     let mut s_rsa = [0u8; 32];
     getrandom(&mut s_rsa).expect("getrandom failed");
@@ -363,7 +392,7 @@ fn main() {
     let ek_ky = dk_ky.encapsulation_key();
     let (ct_ky, sh_ky) = ek_ky.encapsulate();
     let dk_ky_bytes: Vec<u8> = dk_ky.to_bytes().as_slice().to_vec();
-    write_blob(&out_dir, "ky_sk_wrap.bin", &wrap_key(&kek_key, b"ky-sk", &dk_ky_bytes));
+    write_blob(&out_dir, "ky_sk_wrap.bin", &wrap_key(&kyber_wrap_key, b"ky-sk", &dk_ky_bytes));
     write_blob(&out_dir, "ct_ky.bin", ct_ky.as_slice());
     let mut s_ky = [0u8; 32];
     s_ky.copy_from_slice(sh_ky.as_slice());
@@ -380,7 +409,7 @@ fn main() {
     write_blob(
         &out_dir,
         "mce_sk_wrap.bin",
-        &wrap_key(&kek_key, b"mce-sk", &sk_mce_bytes),
+        &wrap_key(&mceliece_wrap_key, b"mce-sk", &sk_mce_bytes),
     );
     let ct_mce_arr: [u8; mc::CRYPTO_CIPHERTEXTBYTES] = *ct_mce.as_array();
     write_blob(&out_dir, "ct_mce.bin", &ct_mce_arr);
@@ -398,31 +427,39 @@ fn main() {
     let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
     
     // ---- [Algorithm 5] FrodoKEM-1344: keypair + encapsulation ----
-    let frodokem_sk = PrivateKey::<FrodoKEM1344>::generate(&mut rng);
-    let frodokem_pk = frodokem_sk.public_key();
-    let (ct_frodo, sh_frodo) = frodokem_pk.encapsulate(&mut rng).expect("frodokem encapsulate");
-    let frodokem_sk_bytes = frodokem_sk.to_bytes().as_slice().to_vec();
+    use frodo_kem::Algorithm as FrodoAlgorithm;
+    let frodo_alg = FrodoAlgorithm::FrodoKem1344Aes;
+    let frodo_params = frodo_alg.params();
+    let (frodo_pk, frodo_sk) = frodo_alg.generate_keypair(&mut rng);
+    
+    // Generate 32-byte shared secret (shard) and salt
+    let mut s_frodo = [0u8; 32];
+    getrandom(&mut s_frodo).expect("getrandom failed");
+    let mut salt = vec![0u8; frodo_params.salt_length];
+    getrandom(&mut salt).expect("getrandom failed");
+    
+    let (ct_frodo, _sh_frodo) = frodo_alg.encapsulate(&frodo_pk, &s_frodo, &salt).expect("frodokem encapsulate");
+    
+    let frodokem_sk_bytes = frodo_sk.to_vec();
     write_blob(
         &out_dir,
         "frodo_sk_wrap.bin",
-        &wrap_key(&kek_key, b"frodo-sk", &frodokem_sk_bytes),
+        &wrap_key(&frodokem_wrap_key, b"frodo-sk", &frodokem_sk_bytes),
     );
-    write_blob(&out_dir, "ct_frodo.bin", ct_frodo.as_slice());
-    let mut s_frodo = [0u8; 32];
-    s_frodo.copy_from_slice(sh_frodo.as_slice());
+    write_blob(&out_dir, "ct_frodo.bin", ct_frodo.as_ref());
     println!(
         "cargo:warning=FrodoKEM-1344: ct={} shard recovered",
-        ct_frodo.as_slice().len()
+        ct_frodo.as_ref().len()
     );
     
     // ---- [Algorithm 6] CRYSTALS-Dilithium-5 (ML-DSA-87): keypair + signing ----
-    let dilithium_keypair: Keypair = Keypair::generate(&mut rng);
-    let dilithium_vk = dilithium_keypair.verifying_key();
-    let dilithium_sk_bytes = dilithium_keypair.secret_key().to_bytes().to_vec();
+    let dilithium_keypair: Keypair = Keypair::generate(None).expect("Dilithium keypair generation");
+    let dilithium_vk = dilithium_keypair.public;
+    let dilithium_sk_bytes = dilithium_keypair.secret.to_bytes().to_vec();
     write_blob(
         &out_dir,
         "dilithium_sk_wrap.bin",
-        &wrap_key(&kek_key, b"dilithium-sk", &dilithium_sk_bytes),
+        &wrap_key(&dilithium_wrap_key, b"dilithium-sk", &dilithium_sk_bytes),
     );
     write_blob(&out_dir, "dilithium_vk.bin", dilithium_vk.to_bytes().as_slice());
     let mut s_dilithium = [0u8; 32];
@@ -446,6 +483,10 @@ fn main() {
     let siv_len = (siv_blob.len() as u32).to_le_bytes();
     write_blob(&out_dir, "serpent_siv_len.bin", &siv_len);
 
+    // Wrap the DEK with the serpent-dek wrapping key for runtime recovery
+    let dek_wrap = wrap_key(&serpent_dek_wrap_key, b"serpent-dek", &dek);
+    write_blob(&out_dir, "dek_wrap.bin", &dek_wrap);
+
     // ---- [Algorithm 8] Ed448: sign the binding message ----
     use ed448_goldilocks::{Signature, SigningKey};
     use ed448_goldilocks::elliptic_curve::Generate;
@@ -464,12 +505,11 @@ fn main() {
     );
 
     // ---- [Algorithm 9] CRYSTALS-Dilithium-5: sign the binding message ----
-    let dilithium_msg = Vec::from(&msg);
-    let dilithium_sig = dilithium_keypair.sign(&dilithium_msg);
-    write_blob(&out_dir, "dilithium_sig.bin", dilithium_sig.as_bytes());
+    let dilithium_sig = dilithium_keypair.sign(&msg, None, RandomMode::Hedged).expect("Dilithium sign");
+    write_blob(&out_dir, "dilithium_sig.bin", &dilithium_sig);
     println!(
         "cargo:warning=CRYSTALS-Dilithium-5: sig={} over (ts|dek|sha256(siv)) signed",
-        dilithium_sig.as_bytes().len()
+        dilithium_sig.len()
     );
 
     // ---- Write all KEM ciphertexts and wrapped private keys for runtime ----
@@ -496,7 +536,12 @@ fn main() {
     zeroize(&mut s_frodo);
     zeroize(&mut s_dilithium);
     zeroize(&mut dek);
-    zeroize(&mut kek_key);
+    zeroize(&mut rsa_wrap_key);
+    zeroize(&mut kyber_wrap_key);
+    zeroize(&mut mceliece_wrap_key);
+    zeroize(&mut frodokem_wrap_key);
+    zeroize(&mut dilithium_wrap_key);
+    zeroize(&mut serpent_dek_wrap_key);
     zeroize(&mut k1);
     zeroize(&mut k2);
     zeroize(&mut km);

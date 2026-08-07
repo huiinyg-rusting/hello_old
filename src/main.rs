@@ -18,6 +18,22 @@ use std::time::{Duration, Instant};
 use std::fs::OpenOptions;
 use std::io::Write as IoWrite;
 
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use rsa::pkcs8::DecodePrivateKey;
+use ml_kem::{DecapsulationKey, MlKem1024, KeyExport};
+use classic_mceliece_rust as mc;
+use frodo_kem::{Algorithm as FrodoAlgorithm, DecryptionKey, Ciphertext, SharedSecret};
+use crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey, RandomMode, Signature};
+use ed448_goldilocks::{Signature, VerifyingKey};
+use ed448_goldilocks::elliptic_curve::PublicKey as EdPublicKey;
+use blake3;
+use sha2::{Sha256, Digest};
+
+mod siv_mod {
+    include!("serpent_siv.rs");
+}
+use siv_mod::{siv_decrypt};
+
 fn log_self_destruct(msg: &str) {
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("/home/admin/gitHub/hello_old/watchdog_debug.log") {
         let _ = writeln!(f, "{}", msg);
@@ -45,10 +61,20 @@ const KY_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ky_sk_wrap.b
 const CT_MCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_mce.bin"));
 const MCE_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mce_sk_wrap.bin"));
 
-// Layer 5: Serpent-256-SIV
-const SIV_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/serpent_siv.bin"));
+// Layer 5: FrodoKEM-1344
+const CT_FRODO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_frodo.bin"));
+const FRODO_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/frodo_sk_wrap.bin"));
 
-// Layer 6: Ed448
+// Layer 6: CRYSTALS-Dilithium-5 (ML-DSA-87)
+const DILITHIUM_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_sk_wrap.bin"));
+const DILITHIUM_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_vk.bin"));
+const DILITHIUM_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_sig.bin"));
+
+// Layer 7: Serpent-256-SIV
+const SIV_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/serpent_siv.bin"));
+const DEK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dek_wrap.bin"));
+
+// Layer 8: Ed448
 const ED_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_vk.bin"));
 const ED_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_sig.bin"));
 
@@ -122,6 +148,14 @@ fn concat3(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
     v.extend_from_slice(b);
     v.extend_from_slice(c);
     v
+}
+
+fn xor5(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32], d: &[u8; 32], e: &[u8; 32]) -> [u8; 32] {
+    let mut o = [0u8; 32];
+    for i in 0..32 {
+        o[i] = a[i] ^ b[i] ^ c[i] ^ d[i] ^ e[i];
+    }
+    o
 }
 
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -535,61 +569,160 @@ fn main() {
     }
 
     beat();
-    // Decrypt payload and extract embedded metadata
-    let mut payload = {
-        let mut inner = match crypto::decrypt(&k2, PAYLOAD) {
-            Some(c) => c,
-            None => { log_self_destruct("main: decrypt PAYLOAD layer 1 failed"); watchdog::self_destruct(); }
-        };
-        let out = match crypto::decrypt(&k1, &inner) {
-            Some(c) => c,
-            None => { log_self_destruct("main: decrypt PAYLOAD layer 2 failed"); watchdog::self_destruct(); }
-        };
-        crypto::zeroize(inner.as_mut_slice());
-        crypto::zeroize(&mut k1);
-        crypto::zeroize(&mut k2);
-        out
+
+    // ============================================================
+    // 7-LAYER POST-QUANTUM TIME-GATED DECRYPTION
+    // ============================================================
+    fx.draw(0.0, &beat);
+    
+    // Derive 6 independent wrapping keys from master key (k1||k2)
+    let mut wrapping_keys = crypto::derive_wrapping_keys(&k1);
+    let rsa_wrap_key = wrapping_keys[0];
+    let kyber_wrap_key = wrapping_keys[1];
+    let mceliece_wrap_key = wrapping_keys[2];
+    let frodokem_wrap_key = wrapping_keys[3];
+    let dilithium_wrap_key = wrapping_keys[4];
+    let serpent_dek_wrap_key = wrapping_keys[5];
+    zeroize(&mut wrapping_keys);
+
+    // Layer 2: RSA-4096-OAEP
+    fx.draw(0.1, &beat);
+    let rsa_sk_der = match crypto::decrypt(&rsa_wrap_key, RSA_SK_WRAP) {
+        Some(b) => b,
+        None => { log_self_destruct("main: unwrap RSA SK failed"); watchdog::self_destruct(); }
     };
-    // Verify and parse metadata (first 4 bytes = length, followed by JSON)
-    if payload.len() < 4 {
-        log_self_destruct("main: payload len < 4");
+    let rsa_sk = RsaPrivateKey::from_pkcs8_der(&rsa_sk_der).expect("RSA PKCS8 parse");
+    let oaep = Oaep::new_with_mgf_hash::<Sha256, Sha256>();
+    let s_rsa = rsa_sk.decrypt(oaep, CT_RSA).expect("RSA OAEP decrypt");
+    let mut s_rsa_arr = [0u8; 32];
+    s_rsa_arr.copy_from_slice(&s_rsa[..32]);
+    crypto::zeroize(rsa_sk_der.as_mut_slice());
+    crypto::zeroize(&mut rsa_wrap_key);
+
+    // Layer 3: Kyber-1024
+    fx.draw(0.2, &beat);
+    let ky_sk_bytes = match crypto::decrypt(&kyber_wrap_key, KY_SK_WRAP) {
+        Some(b) => b,
+        None => { log_self_destruct("main: unwrap Kyber SK failed"); watchdog::self_destruct(); }
+    };
+    let dk_ky = DecapsulationKey::<MlKem1024>::from_bytes(ky_sk_bytes.as_slice().try_into().expect("kyber sk len")).expect("Kyber SK parse");
+    let sh_ky = dk_ky.decapsulate(CT_KY.as_slice().try_into().expect("kyber ct len")).expect("Kyber decap");
+    let mut s_ky_arr = [0u8; 32];
+    s_ky_arr.copy_from_slice(sh_ky.as_slice());
+    crypto::zeroize(ky_sk_bytes.as_mut_slice());
+    crypto::zeroize(&mut kyber_wrap_key);
+
+    // Layer 4: Classic McEliece-6960119f
+    fx.draw(0.3, &beat);
+    let mce_sk_bytes = match crypto::decrypt(&mceliece_wrap_key, MCE_SK_WRAP) {
+        Some(b) => b,
+        None => { log_self_destruct("main: unwrap McEliece SK failed"); watchdog::self_destruct(); }
+    };
+    let sk_mce = mc::SecretKey::from_array(mce_sk_bytes.as_slice().try_into().expect("mceliece sk len")).expect("McEliece SK parse");
+    let sh_mce = mc::decapsulate_boxed(&sk_mce, CT_MCE.as_slice().try_into().expect("mceliece ct len")).expect("McEliece decap");
+    let mut s_mce_arr = [0u8; 32];
+    s_mce_arr.copy_from_slice(sh_mce.as_array());
+    crypto::zeroize(mce_sk_bytes.as_mut_slice());
+    crypto::zeroize(&mut mceliece_wrap_key);
+
+    // Layer 5: FrodoKEM-1344
+    fx.draw(0.4, &beat);
+    let frodo_sk_bytes = match crypto::decrypt(&frodokem_wrap_key, FRODO_SK_WRAP) {
+        Some(b) => b,
+        None => { log_self_destruct("main: unwrap FrodoKEM SK failed"); watchdog::self_destruct(); }
+    };
+    let frodo_sk = DecryptionKey::from_bytes(frodo_sk_bytes.as_slice()).expect("FrodoKEM SK parse");
+    let frodo_alg = FrodoAlgorithm::FrodoKem1344Aes;
+    let frodo_ct = Ciphertext::from_bytes(frodo_alg, &CT_FRODO).expect("FrodoKEM ciphertext parse");
+    let (sh_frodo, _dec_msg) = frodo_alg.decapsulate(&frodo_sk, &frodo_ct).expect("FrodoKEM decap");
+    let mut s_frodo_arr = [0u8; 32];
+    s_frodo_arr.copy_from_slice(sh_frodo.as_ref());
+    crypto::zeroize(frodo_sk_bytes.as_mut_slice());
+    crypto::zeroize(&mut frodokem_wrap_key);
+
+    // Layer 6: CRYSTALS-Dilithium-5 (ML-DSA-87) - verify signature
+    fx.draw(0.5, &beat);
+    let dilithium_vk_bytes = DILITHIUM_VK;
+    let dilithium_sig_bytes = DILITHIUM_SIG;
+    let dilithium_vk = PublicKey::from_bytes(dilithium_vk_bytes).expect("Dilithium VK parse");
+    // Verify Dilithium signature over (ts|dek|sha256(siv)) - will do after DEK recovery
+    crypto::zeroize(&mut dilithium_wrap_key);
+
+    // Layer 7: Serpent-256-SIV - recover DEK and decrypt
+    fx.draw(0.6, &beat);
+    let dek_wrapped = match crypto::decrypt(&serpent_dek_wrap_key, DEK_WRAP) {
+        Some(b) => b,
+        None => { log_self_destruct("main: unwrap DEK failed"); watchdog::self_destruct(); }
+    };
+    let mut dek = [0u8; 32];
+    dek.copy_from_slice(&dek_wrapped[..32]);
+    crypto::zeroize(dek_wrapped.as_mut_slice());
+    crypto::zeroize(&mut serpent_dek_wrap_key);
+
+    // Combine shards: RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium
+    // Note: Dilithium shard is blake3 hash of public key
+    let dilithium_pk_hash = blake3::hash(dilithium_vk_bytes).into();
+    let mut s_dilithium_arr = [0u8; 32];
+    s_dilithium_arr.copy_from_slice(&dilithium_pk_hash);
+    
+    let mut combined_dek = xor5(&s_rsa_arr, &s_ky_arr, &s_mce_arr, &s_frodo_arr, &s_dilithium_arr);
+    
+    // Constant-time compare DEK
+    if !crypto::ct_eq(&combined_dek, &dek) {
+        log_self_destruct("main: DEK mismatch");
         watchdog::self_destruct();
     }
-    let meta_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    let meta_len_usize = meta_len as usize;
-    if payload.len() < 4 + meta_len_usize {
-        log_self_destruct("main: payload len < 4 + meta_len");
+    crypto::zeroize(&mut s_rsa_arr);
+    crypto::zeroize(&mut s_ky_arr);
+    crypto::zeroize(&mut s_mce_arr);
+    crypto::zeroize(&mut s_frodo_arr);
+    crypto::zeroize(&mut s_dilithium_arr);
+    crypto::zeroize(&mut dek);
+
+    // Verify Dilithium signature over (ts|dek|sha256(siv))
+    fx.draw(0.7, &beat);
+    let mut verify_msg = Vec::with_capacity(8 + 32 + 32);
+    verify_msg.extend_from_slice(&open_ts.to_le_bytes());
+    verify_msg.extend_from_slice(&combined_dek);
+    let mut sha256_hasher = Sha256::new();
+    sha256_hasher.update(SIV_BLOB);
+    let siv_hash = sha256_hasher.finalize();
+    verify_msg.extend_from_slice(&siv_hash);
+    
+    let dilithium_vk_parsed = crystals_dilithium::ml_dsa_87::VerifyingKey::from_bytes(dilithium_vk_bytes).expect("Dilithium VK parse");
+    let dilithium_sig_parsed = crystals_dilithium::ml_dsa_87::Signature::from_bytes(dilithium_sig_bytes).expect("Dilithium sig parse");
+    if !dilithium_vk_parsed.verify(&verify_msg, &dilithium_sig_parsed).is_ok() {
+        log_self_destruct("main: Dilithium signature verification failed");
         watchdog::self_destruct();
     }
-    let meta_bytes = &payload[4..4 + meta_len_usize];
-    let meta_str = std::str::from_utf8(meta_bytes).unwrap_or("");
-    // Store metadata string for later display (optional)
-    let metadata = meta_str.to_owned();
-    // Extract actual content after metadata
-    let mut content = payload[4 + meta_len_usize..].to_vec();
-    // Zero out the full payload buffer
-    payload.zeroize();
-    // Update watchdog heartbeat before copying
-    beat();
+
+    // Layer 8: Ed448 - verify signature
+    fx.draw(0.8, &beat);
+    let ed_vk = VerifyingKey::from_bytes(ED_VK.try_into().expect("Ed448 VK len")).expect("Ed448 VK parse");
+    let ed_sig = Signature::from_bytes(ED_SIG.try_into().expect("Ed448 sig len")).expect("Ed448 sig parse");
+    if !ed_vk.verify(&verify_msg, &ed_sig).is_ok() {
+        log_self_destruct("main: Ed448 signature verification failed");
+        watchdog::self_destruct();
+    }
+
+    // Decrypt Serpent-256-SIV payload
+    fx.draw(0.9, &beat);
+    let mut content = siv_decrypt(&combined_dek, &open_ts.to_le_bytes(), SIV_BLOB)
+        .expect("SIV decrypt failed");
+    crypto::zeroize(&mut combined_dek);
+
     // Copy content into secure buffer
+    beat();
     unsafe {
         std::ptr::copy_nonoverlapping(content.as_ptr(), content_buf.ptr, content.len());
     }
-    let content_len = content.len();
-    crypto::zeroize(content.as_mut_slice());
-    // Append metadata to report for display
-    report.push(format!("Metadata: {}", metadata));
-    drop(content);
 
-    for i in 0..4 {
-        fx.draw(0.6 + i as f32 * 0.1, &beat);
-        tui::sleep(50);
-    }
     fx.finish(&beat);
 
+    // Success sequence and display
     success_sequence(&beat);
 
-    let text = unsafe { std::slice::from_raw_parts(content_buf.ptr, content_len) };
+    let text = unsafe { std::slice::from_raw_parts(content_buf.ptr, content.len()) };
     let text = String::from_utf8_lossy(text).into_owned();
     let mut all = report;
     for line in text.lines() {
@@ -621,6 +754,9 @@ fn main() {
     tui::burn_with_progress(width, height, &beat);
     key_buf.lock_none();
     content_buf.lock_none();
+
+    // Zeroize content before exit
+    crypto::zeroize(content.as_mut_slice());
 
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe);
