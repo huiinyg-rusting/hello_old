@@ -12,6 +12,7 @@ mod tui;
 mod watchdog;
 
 use std::io::{IsTerminal, Write};
+use zeroize::Zeroize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -499,7 +500,8 @@ fn main() {
     }
 
     beat();
-    let mut content = {
+    // Decrypt payload and extract embedded metadata
+    let mut payload = {
         let mut inner = match crypto::decrypt(&k1, PAYLOAD) {
             Some(c) => c,
             None => watchdog::self_destruct(),
@@ -513,15 +515,38 @@ fn main() {
         crypto::zeroize(&mut k2);
         out
     };
+    // Verify and parse metadata (first 4 bytes = length, followed by JSON)
+    if payload.len() < 4 {
+        watchdog::self_destruct();
+    }
+    let meta_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let meta_len_usize = meta_len as usize;
+    if payload.len() < 4 + meta_len_usize {
+        watchdog::self_destruct();
+    }
+    let meta_bytes = &payload[4..4 + meta_len_usize];
+    let meta_str = std::str::from_utf8(meta_bytes).unwrap_or("");
+    // Store metadata string for later display (optional)
+    let metadata = meta_str.to_owned();
+    // Extract actual content after metadata
+    let mut content = payload[4 + meta_len_usize..].to_vec();
+    // Zero out the full payload buffer
+    payload.zeroize();
+    // Update watchdog heartbeat before copying
+    beat();
+    // Copy content into secure buffer
     unsafe {
         std::ptr::copy_nonoverlapping(content.as_ptr(), content_buf.ptr, content.len());
     }
     let content_len = content.len();
     crypto::zeroize(content.as_mut_slice());
+    // Append metadata to report for display
+    report.push(format!("Metadata: {}", metadata));
     drop(content);
+
     for i in 0..4 {
         fx.draw(0.6 + i as f32 * 0.1, &beat);
-        tui::sleep(40);
+        tui::sleep(10);
     }
     fx.finish(&beat);
 

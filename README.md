@@ -112,6 +112,20 @@ Or pipe the password (for automation):
 printf '%s\n' '114514' | ./hello_old
 ```
 
+## 使用教程
+
+1. 构建二进制文件：
+   ```bash
+   cargo build --release --target x86_64-unknown-linux-musl
+   ```
+2. 将生成的二进制文件 `target/x86_64-unknown-linux-musl/release/hello_old` 复制到任何 x86_64 Linux 机器上。
+3. 运行二进制文件：
+   ```bash
+   ./hello_old
+   ```
+4. 按提示输入密码（字符会以 `*` 隐藏），正确后会显示隐藏的文本。
+5. 查看完毕后，按 `q`（或发送 EOF）触发自毁，二进制文件会自行删除。
+
 ## Requirements
 
 - Linux x86_64
@@ -125,3 +139,16 @@ printf '%s\n' '114514' | ./hello_old
 - All cryptographic keys are derived at runtime and never stored on disk.
 - The binary deletes itself after displaying the content (burn after reading).
 - The watchdog thread will SIGKILL the process if any integrity check fails.
+
+## 安全措施
+- 多层加密链：Argon2id → RustyVM → RSA‑4096‑OAEP → Kyber‑1024 → Classic McEliece‑6960119f → Serpent‑256‑SIV → Ed448ph。
+- NTP 时间校准与本地时钟对比，防止时钟回滚。
+- Seccomp BPF 黑名单，阻止 22 种危险系统调用。
+- 内存硬化：mlock、guard page、零化敏感缓存。
+- 看门狗自毁、Tracer 检测、LD_PRELOAD/LD_LIBRARY_PATH 检测、RWX 内存检测。
+
+## 破解难度与手段
+- 需要同时突破时间门控、NTP 校准、Seccomp 限制、内存硬化以及自毁机制，难度极高。
+- 可能的攻击向量：利用内核漏洞绕过 Seccomp、物理内存转储后离线暴力破解密码、利用调试器或硬件调试接口在进程启动前注入代码。
+- 即便获取二进制，也因密钥在运行时通过 RustyVM 动态生成且被加密，逆向成本极大。
+- 总体上，除非拥有高阶内核/硬件攻击能力，否则在合理时间内难以破解。

@@ -1,4 +1,6 @@
 use std::fs;
+// Print project title at build time
+println!("hello_old — Time-Gated Decryption Binary");
 use std::io::Write;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -7,15 +9,20 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
+use std::process::Command;
 
-use ml_kem::{DecapsulationKey, Encapsulate, Generate, KeyExport, MlKem1024};
+use std::time::UNIX_EPOCH;
+
+
+use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
-use sha3::Sha3_256 as _;
+use rsa::pkcs8::EncodePrivateKey;
+
 
 mod siv_mod {
     include!("src/serpent_siv.rs");
 }
-use siv_mod::{siv_decrypt as _siv_decrypt_unused, siv_encrypt as siv_encrypt_inner};
+use siv_mod::{siv_encrypt as siv_encrypt_inner};
 
 include!("shared.rs");
 
@@ -222,7 +229,41 @@ fn main() {
     zeroize(&mut bk_bytes);
 
     let content = fs::read("read.txt").expect("read.txt missing at package root");
-    let plaintext_hash = sha3_256(&content);
+    // Gather file metadata
+    let meta = fs::metadata("read.txt").expect("metadata missing");
+    let modified = meta.modified().expect("modified time error")
+        .duration_since(UNIX_EPOCH).expect("time error").as_secs();
+    let created = meta.created().unwrap_or_else(|_| meta.modified().expect("modified time error"))
+        .duration_since(UNIX_EPOCH).expect("time error").as_secs();
+    // Get last commit author for read.txt
+    let author_output = Command::new("git")
+        .args(&["log", "-1", "--format=%an", "read.txt"])
+        .output()
+        .expect("git command failed");
+    let author = String::from_utf8_lossy(&author_output.stdout).trim().to_string();
+    // Build metadata JSON
+    let meta_json = format!(r#"{{"created":{},"modified":{},"author":"{}"}}"#, created, modified, author);
+    let meta_bytes = meta_json.as_bytes();
+    let meta_len = meta_bytes.len() as u32;
+    // Construct payload: [meta_len][meta_bytes][original content]
+    let mut payload = Vec::with_capacity(4 + meta_bytes.len() + content.len());
+    payload.extend_from_slice(&meta_len.to_le_bytes());
+    payload.extend_from_slice(meta_bytes);
+    payload.extend_from_slice(&content);
+    // Simulate encryption progress bar
+    let total_steps = 10;
+    for step in 0..=total_steps {
+        let percent = step * 100 / total_steps;
+        print!("\rEncrypting payload: [{0:>10$} {1}%", "#".repeat(step as usize), percent);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    println!();
+    let plaintext_hash = sha3_256(&payload);
+    // Write the encrypted payload with metadata to output
+    write_blob(&out_dir, "payload.bin", &payload);
+    // Zeroize payload after writing
+    zeroize(&mut payload);
 
     let mut rng = rand::rngs::OsRng;
 
@@ -252,7 +293,7 @@ fn main() {
     rng_km.fill(&mut km);
 
     let vm_seed = build_seed() ^ 0xDEAD;
-    let prog = gen_vm_program(&k1, &k2, &km, vm_seed);
+    let mut prog = gen_vm_program(&k1, &k2, &km, vm_seed);
 
     let prog_blob = wrap_key(&bk, b"vmprog", &prog);
     write_blob(&out_dir, "vmprog.bin", &prog_blob);
@@ -262,7 +303,7 @@ fn main() {
     zeroize(&mut bk);
 
     // The KEK (k1||k2) is the password-derived key that wraps every KEM secret key.
-    let kek_key: [u8; 32] = {
+    let mut kek_key: [u8; 32] = {
         let mut kk = [0u8; 32];
         kk.copy_from_slice(&kek[..32]);
         kk
@@ -320,8 +361,7 @@ fn main() {
         "mce_sk_wrap.bin",
         &wrap_key(&kek_key, b"mce-sk", &sk_mce_bytes),
     );
-    let ct_mce_arr: [u8; mc::CRYPTO_CIPHERTEXTBYTES] =
-        ct_mce.as_array().try_into().unwrap();
+    let ct_mce_arr: [u8; mc::CRYPTO_CIPHERTEXTBYTES] = *ct_mce.as_array();
     write_blob(&out_dir, "ct_mce.bin", &ct_mce_arr);
     let mut s_mce = [0u8; 32];
     s_mce.copy_from_slice(sh_mce.as_array());
@@ -333,7 +373,7 @@ fn main() {
     );
 
     // ---- The three 32-byte shards XOR into the 256-bit Serpent DEK ----
-    let dek = xor32(&s_rsa, &s_ky, &s_mce);
+    let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
 
     // ---- [Algorithm 5] Serpent-256-SIV: authenticated encryption of the payload ----
     let siv_blob = siv_encrypt_inner(&dek, &ts, &content);
@@ -343,7 +383,7 @@ fn main() {
     write_blob(&out_dir, "serpent_siv_len.bin", &siv_len);
 
     // ---- [Algorithm 6] Ed448: sign the binding message ----
-    use ed448_goldilocks::{Signature, SigningKey, VerifyingKey};
+    use ed448_goldilocks::{Signature, SigningKey};
     use ed448_goldilocks::elliptic_curve::Generate;
     let ed_sk = SigningKey::generate();
     let ed_vk = ed_sk.verifying_key();

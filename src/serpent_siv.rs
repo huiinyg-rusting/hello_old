@@ -1,13 +1,13 @@
-//! Serpent-256-SIV: SIV (RFC 5297) authenticated encryption built on the
-//! Serpent block cipher. The 256-bit master key is split into two 128-bit
-//! subkeys K1 (CMAC / S2V) and K2 (CTR), matching the AEAD_AES_SIV_CMAC_256
-//! construction but with Serpent in place of AES.
-//!
-//! This module is flat (only external-crate imports) so it can be shared
-//! verbatim between the build script (`build.rs`) and the runtime via `include!`.
+// Serpent-256-SIV: SIV (RFC 5297) authenticated encryption built on the
+/// Serpent block cipher. The 256-bit master key is split into two 128-bit
+/// subkeys K1 (CMAC / S2V) and K2 (CTR), matching the AEAD_AES_SIV_CMAC_256
+/// construction but with Serpent in place of AES.
+///
+/// This module is flat (only external-crate imports) so it can be shared
+/// verbatim between the build script (`build.rs`) and the runtime via `include!`.
 
 use cmac::{Cmac, Mac};
-use cipher::{Block, BlockCipherEncrypt};
+use cipher::{Block, BlockCipherEncrypt, KeyInit};
 use serpent::Serpent;
 
 const B: usize = 16;
@@ -43,7 +43,7 @@ fn dbl(s: &mut [u8; B]) {
 
 fn serpent_enc_block(k: &[u8], in16: &[u8; B]) -> [u8; B] {
     let cipher = Serpent::new_from_slice(k).expect("serpent key length");
-    let mut blk = Block16::clone_from_slice(in16);
+    let mut blk = Block16::from_slice(in16).clone();
     cipher.encrypt_block(&mut blk);
     let mut out = [0u8; B];
     out.copy_from_slice(blk.as_slice());
@@ -53,9 +53,9 @@ fn serpent_enc_block(k: &[u8], in16: &[u8; B]) -> [u8; B] {
 fn cmac_serpent(key: &[u8], data: &[u8]) -> [u8; B] {
     let mut mac = <CmacSerpent as cmac::KeyInit>::new_from_slice(key).expect("cmac key length");
     mac.update(data);
-    let tag = mac.finalize().as_bytes();
+    let tag = mac.finalize();
     let mut out = [0u8; B];
-    out.copy_from_slice(tag.as_slice());
+    out.copy_from_slice(tag.as_bytes());
     out
 }
 
@@ -147,41 +147,4 @@ pub fn siv_encrypt(key32: &[u8], ad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn siv_decrypt(key32: &[u8], ad: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
-    if blob.len() < B + 1 {
-        return None;
-    }
-    let (v, ct) = blob.split_at(B);
-    let mut v = {
-        let mut a = [0u8; B];
-        a.copy_from_slice(v);
-        a
-    };
-    let k1 = &key32[..16];
-    let k2 = &key32[16..32];
-    let mut q = v;
-    ctr_mask(&mut q);
-    let mut counter = q;
-    let mut plain: Vec<u8> = Vec::with_capacity(ct.len());
-    let mut i = 0;
-    while i < ct.len() {
-        let ek = serpent_enc_block(k2, &counter);
-        let mut j = 0;
-        let take = (B).min(ct.len() - i);
-        while j < take {
-            plain.push(ct[i + j] ^ ek[j]);
-            j += 1;
-        }
-        inc128(&mut counter);
-        i += take;
-    }
-    let tv = s2v(k1, &[ad], &plain);
-    // Constant-time-ish compare
-    let mut acc = 0u8;
-    let mut k = 0;
-    while k < B {
-        acc |= tv[k] ^ v[k];
-        k += 1;
-    }
-    if acc == 0 { Some(plain) } else { None }
-}
+
