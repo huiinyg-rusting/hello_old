@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 chacha20poly1305 = "0.10"
+sha2 = "0.10"
 sha3 = "0.10"
 libc = "0.2"
 argon2 = { version = "0.5", features = ["std"] }
@@ -12,27 +13,28 @@ rand = { version = "0.8", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
 zeroize = "1.7"
 subtle = "2.5"
-ml-kem = "0.3"
+ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
 serpent = "0.6"
 cipher = "0.5"
 cmac = "0.8"
 ed448-goldilocks = "0.14.0-pre.15"
 rsa = { version = "0.9", features = ["sha2"] }
-classic-mceliece-rust = "3.1"
+classic-mceliece-rust = { version = "3.1", features = ["mceliece6960119f"] }
 
 [build-dependencies]
 chacha20poly1305 = "0.10"
+sha2 = "0.10"
 sha3 = "0.10"
 rand = { version = "0.8", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
 argon2 = { version = "0.5", features = ["std"] }
-ml-kem = "0.3"
+ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
 serpent = "0.6"
 cipher = "0.5"
 cmac = "0.8"
 ed448-goldilocks = "0.14.0-pre.15"
 rsa = { version = "0.9", features = ["sha2"] }
-classic-mceliece-rust = "3.1"
+classic-mceliece-rust = { version = "3.1", features = ["mceliece6960119f"] }
 
 [profile.release]
 opt-level = "z"

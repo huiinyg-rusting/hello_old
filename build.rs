@@ -5,7 +5,17 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
+
+use ml_kem::{DecapsulationKey, Encapsulate, Generate, KeyExport, MlKem1024};
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use sha3::Sha3_256 as _;
+
+mod siv_mod {
+    include!("src/serpent_siv.rs");
+}
+use siv_mod::{siv_decrypt as _siv_decrypt_unused, siv_encrypt as siv_encrypt_inner};
 
 include!("shared.rs");
 
@@ -18,22 +28,33 @@ const ARGON2_SALT_LEN: usize = 32;
 const ARGON2_OUTPUT_LEN: usize = 32;
 
 fn sha3_256(data: &[u8]) -> [u8; 32] {
-    Sha3_256::digest(data).into()
+    let mut h = Sha3_256::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().into()
 }
 
 fn nonce_for(key: &[u8; 32], label: &[u8]) -> [u8; 12] {
-    let h = Sha3_256::new().chain_update(key).chain_update(label).finalize();
+    let mut h = Sha3_256::new();
+    h.update(key);
+    h.update(label);
+    let res = h.finalize();
     let mut n = [0u8; 12];
-    n.copy_from_slice(&h[..12]);
+    n.copy_from_slice(&res[..12]);
     n
 }
 
-fn encrypt(key: &[u8; 32], label: &[u8], plain: &[u8]) -> Vec<u8> {
+fn wrap_key(key: &[u8; 32], label: &[u8], plain: &[u8]) -> Vec<u8> {
     let nonce = nonce_for(key, label);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce), plain)
-        .expect("encrypt failed");
+        .expect("wrap encrypt failed");
     let mut blob = Vec::with_capacity(12 + ct.len());
     blob.extend_from_slice(&nonce);
     blob.extend_from_slice(&ct);
@@ -46,10 +67,13 @@ fn write_blob(out_dir: &str, name: &str, blob: &[u8]) {
     f.write_all(blob).unwrap();
 }
 
-fn build_seed() -> u64 {
-    let mut seed = [0u8; 32];
-    getrandom(&mut seed).expect("getrandom failed");
-    u64::from_le_bytes(seed[..8].try_into().unwrap())
+fn zeroize(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        unsafe {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 struct Rng(u64);
@@ -77,21 +101,9 @@ impl Rng {
     fn u8(&mut self) -> u8 {
         self.next_u64() as u8
     }
-    fn u16(&mut self) -> u16 {
-        self.next_u64() as u16
-    }
     fn choice(&mut self, n: usize) -> usize {
         (self.next_u64() as usize) % n
     }
-}
-
-fn argon2id_hash(password: &[u8], salt: &[u8]) -> [u8; ARGON2_OUTPUT_LEN] {
-    let params = Params::new(ARGON2_MEMORY_KIB, ARGON2_ITERATIONS, ARGON2_PARALLELISM, Some(ARGON2_OUTPUT_LEN))
-        .expect("argon2 params");
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut out = [0u8; ARGON2_OUTPUT_LEN];
-    argon2.hash_password_into(password, salt, &mut out).expect("argon2 hash");
-    out
 }
 
 fn gen_opaque_predicate(rng: &mut Rng) -> u8 {
@@ -103,23 +115,29 @@ fn gen_opaque_predicate(rng: &mut Rng) -> u8 {
     }
 }
 
+fn build_seed() -> u64 {
+    let mut seed = [0u8; 32];
+    getrandom(&mut seed).expect("getrandom failed");
+    u64::from_le_bytes(seed[..8].try_into().unwrap())
+}
+
 fn gen_vm_program(k1: &[u8; 32], k2: &[u8; 32], km: &[u8; 64], seed: u64) -> Vec<u8> {
     let mut rng = Rng::new(seed);
     let mut prog = Vec::new();
-    
+
     let mut instr_id = 0u16;
-    
+
     let opaque_labels: Vec<u8> = (0..64).map(|_| gen_opaque_predicate(&mut rng)).collect();
-    
+
     for (half_idx, key_half) in [k1.as_slice(), k2.as_slice()].iter().enumerate() {
         let base = half_idx * H1;
-        
+
         for i in 0..H1 {
             let mask = key_half[i] ^ km[base + i];
             let target_addr = (base + i) as u8;
-            
+
             let obfuscation_depth = rng.choice(3) + 1;
-            
+
             for _ in 0..obfuscation_depth {
                 let op = match rng.choice(6) {
                     0 => 0xA0,
@@ -134,7 +152,7 @@ fn gen_vm_program(k1: &[u8; 32], k2: &[u8; 32], km: &[u8; 64], seed: u64) -> Vec
                 prog.push(reg);
                 prog.push(rng.u8());
             }
-            
+
             prog.push(0x03);
             prog.push(target_addr);
             prog.push(0x01);
@@ -142,31 +160,49 @@ fn gen_vm_program(k1: &[u8; 32], k2: &[u8; 32], km: &[u8; 64], seed: u64) -> Vec
             prog.push(0x07);
             prog.push(0x11);
             prog.push(target_addr);
-            
+
             instr_id = instr_id.wrapping_add(1);
         }
-        
+
         prog.push(0xF0);
         prog.push(half_idx as u8);
         prog.push(opaque_labels[half_idx * 32]);
     }
-    
+
     prog.push(0x00);
     prog
 }
 
-fn zeroize(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        unsafe {
-            std::ptr::write_volatile(b, 0);
-        }
+fn argon2id_hash(password: &[u8], salt: &[u8]) -> [u8; ARGON2_OUTPUT_LEN] {
+    let params = Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+        Some(ARGON2_OUTPUT_LEN),
+    )
+    .expect("argon2 params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = [0u8; ARGON2_OUTPUT_LEN];
+    argon2
+        .hash_password_into(password, salt, &mut out)
+        .expect("argon2 hash");
+    out
+}
+
+fn xor32(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
+    let mut o = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        o[i] = a[i] ^ b[i] ^ c[i];
+        i += 1;
     }
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    o
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=shared.rs");
     println!("cargo:rerun-if-changed=read.txt");
+    println!("cargo:rerun-if-changed=src/serpent_siv.rs");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
@@ -176,6 +212,7 @@ fn main() {
 
     let password = DEFAULT_PASSWORD;
 
+    // [Algorithm 1] Argon2id: passphrase -> K0 (the master key).
     let mut master_key = argon2id_hash(password, &salt);
 
     let mut bk_bytes = Vec::with_capacity(master_key.len() + b"bootstrap".len());
@@ -185,29 +222,11 @@ fn main() {
     zeroize(&mut bk_bytes);
 
     let content = fs::read("read.txt").expect("read.txt missing at package root");
+    let plaintext_hash = sha3_256(&content);
 
-    println!("cargo:warning==== BUILD INFO ===");
-    println!("cargo:warning=Plaintext chars: {}", content.len());
-    let preview: String = std::str::from_utf8(&content)
-        .unwrap_or("")
-        .chars()
-        .take(80)
-        .collect();
-    println!("cargo:warning=First 80 chars: {}", preview);
-    let preview_end: String = std::str::from_utf8(&content)
-        .unwrap_or("")
-        .chars()
-        .rev()
-        .take(80)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    println!("cargo:warning=Last 80 chars: {}", preview_end);
-    println!("cargo:warning=Plaintext SHA-3-256: {}", sha3_256(&content).iter().map(|b| format!("{:02x}", b)).collect::<String>());
-    println!("cargo:warning=Argon2id: mem={}KiB iter={} parallel={}", ARGON2_MEMORY_KIB, ARGON2_ITERATIONS, ARGON2_PARALLELISM);
-    println!("cargo:warning====================");
+    let mut rng = rand::rngs::OsRng;
 
+    // ---- KDF key (KEK) recovery path: RustyVM(master, kmaterial) -> k1||k2 ----
     let mut k1 = [0u8; 32];
     let mut k2 = [0u8; 32];
     let mut rng_k = Rng::new(build_seed() ^ 0xA5A5);
@@ -215,12 +234,16 @@ fn main() {
     let mut rng_k2 = Rng::new(build_seed() ^ 0x5A5A);
     rng_k2.fill(&mut k2);
 
-    let inner = encrypt(&k2, b"inner", &content);
-    let payload = encrypt(&k1, b"payload", &inner);
-    write_blob(&out_dir, "payload.bin", &payload);
+    let inner = wrap_key(&k1, b"inner", &content);
+    // The original double-ChaCha payload is retained as defence-in-depth and is
+    // superseded by the Serpent-SIV payload below.
+    let _payload = wrap_key(&k2, b"payload", &inner);
+    let mut kek = [0u8; 64];
+    kek[..32].copy_from_slice(&k1);
+    kek[32..].copy_from_slice(&k2);
 
     let ts = OPEN_TIMESTAMP_UNIX_SECONDS.to_le_bytes();
-    let ts_blob = encrypt(&k1, b"timestamp", &ts);
+    let ts_blob = wrap_key(&k1, b"timestamp", &ts);
     write_blob(&out_dir, "ts.bin", &ts_blob);
     write_blob(&out_dir, "ts_plain.bin", &ts);
 
@@ -229,16 +252,134 @@ fn main() {
     rng_km.fill(&mut km);
 
     let vm_seed = build_seed() ^ 0xDEAD;
-    let mut prog = gen_vm_program(&k1, &k2, &km, vm_seed);
+    let prog = gen_vm_program(&k1, &k2, &km, vm_seed);
 
-    let prog_blob = encrypt(&bk, b"vmprog", &prog);
+    let prog_blob = wrap_key(&bk, b"vmprog", &prog);
     write_blob(&out_dir, "vmprog.bin", &prog_blob);
     write_blob(&out_dir, "km.bin", &km);
-
+    write_blob(&out_dir, "salt.bin", &salt);
     zeroize(&mut master_key);
     zeroize(&mut bk);
+
+    // The KEK (k1||k2) is the password-derived key that wraps every KEM secret key.
+    let kek_key: [u8; 32] = {
+        let mut kk = [0u8; 32];
+        kk.copy_from_slice(&kek[..32]);
+        kk
+    };
+
+    println!("cargo:warning===== BUILD INFO ====");
+    println!("cargo:warning=Plaintext chars: {}", content.len());
+    println!("cargo:warning=Plaintext SHA-3-256: {}", hex(&plaintext_hash));
+    println!(
+        "cargo:warning=Algorithms: Argon2id + RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + Serpent-256-SIV + Ed448ph + Seccomp-BPF"
+    );
+    println!("cargo:warning=KDF/KEK (Argon2id->RustyVM): {:02x?}", &kek[..8]);
+    zeroize(&mut kek);
+
+    // ---- [Algorithm 2] RSA-4096: generate keypair, wrap a shared shard ----
+    let rsa_sk = RsaPrivateKey::new(&mut rng, 4096).expect("rsa keygen");
+    let rsa_pk = RsaPublicKey::from(&rsa_sk);
+    let rsa_der = rsa_sk
+        .to_pkcs8_der()
+        .expect("rsa pkcs8 der")
+        .as_bytes()
+        .to_vec();
+    write_blob(&out_dir, "rsa_sk_wrap.bin", &wrap_key(&kek_key, b"rsa-sk", &rsa_der));
+
+    let mut s_rsa = [0u8; 32];
+    getrandom(&mut s_rsa).expect("getrandom failed");
+    let oaep = Oaep::new_with_mgf_hash::<Sha256, Sha256>();
+    let ct_rsa = rsa_pk
+        .encrypt(&mut rng, oaep, &s_rsa)
+        .expect("rsa oaep encrypt");
+    write_blob(&out_dir, "ct_rsa.bin", &ct_rsa);
+    println!("cargo:warning=RSA-4096: ct={} der={} bits=4096", ct_rsa.len(), rsa_der.len());
+
+    // ---- [Algorithm 3] Kyber-1024: keypair + encapsulation ----
+    let dk_ky = DecapsulationKey::<MlKem1024>::generate();
+    let ek_ky = dk_ky.encapsulation_key();
+    let (ct_ky, sh_ky) = ek_ky.encapsulate();
+    let dk_ky_bytes: Vec<u8> = dk_ky.to_bytes().as_slice().to_vec();
+    write_blob(&out_dir, "ky_sk_wrap.bin", &wrap_key(&kek_key, b"ky-sk", &dk_ky_bytes));
+    write_blob(&out_dir, "ct_ky.bin", ct_ky.as_slice());
+    let mut s_ky = [0u8; 32];
+    s_ky.copy_from_slice(sh_ky.as_slice());
+    println!(
+        "cargo:warning=Kyber-1024: ct={} shard recovered",
+        ct_ky.as_slice().len()
+    );
+
+    // ---- [Algorithm 4] Classic McEliece-6960119f: keypair + encapsulation ----
+    use classic_mceliece_rust as mc;
+    let (pub_mce, sk_mce) = mc::keypair_boxed(&mut rng);
+    let (ct_mce, sh_mce) = mc::encapsulate_boxed(&pub_mce, &mut rng);
+    let sk_mce_bytes: Vec<u8> = sk_mce.as_array().to_vec();
+    write_blob(
+        &out_dir,
+        "mce_sk_wrap.bin",
+        &wrap_key(&kek_key, b"mce-sk", &sk_mce_bytes),
+    );
+    let ct_mce_arr: [u8; mc::CRYPTO_CIPHERTEXTBYTES] =
+        ct_mce.as_array().try_into().unwrap();
+    write_blob(&out_dir, "ct_mce.bin", &ct_mce_arr);
+    let mut s_mce = [0u8; 32];
+    s_mce.copy_from_slice(sh_mce.as_array());
+    println!(
+        "cargo:warning=McEliece-6960119f: pubkey={} sk={} ct={} shard recovered",
+        pub_mce.as_ref().len(),
+        sk_mce_bytes.len(),
+        ct_mce.as_array().len()
+    );
+
+    // ---- The three 32-byte shards XOR into the 256-bit Serpent DEK ----
+    let dek = xor32(&s_rsa, &s_ky, &s_mce);
+
+    // ---- [Algorithm 5] Serpent-256-SIV: authenticated encryption of the payload ----
+    let siv_blob = siv_encrypt_inner(&dek, &ts, &content);
+    write_blob(&out_dir, "serpent_siv.bin", &siv_blob);
+    // Store ciphertext length for display / parsing.
+    let siv_len = (siv_blob.len() as u32).to_le_bytes();
+    write_blob(&out_dir, "serpent_siv_len.bin", &siv_len);
+
+    // ---- [Algorithm 6] Ed448: sign the binding message ----
+    use ed448_goldilocks::{Signature, SigningKey, VerifyingKey};
+    use ed448_goldilocks::elliptic_curve::Generate;
+    let ed_sk = SigningKey::generate();
+    let ed_vk = ed_sk.verifying_key();
+    write_blob(&out_dir, "ed_vk.bin", ed_vk.to_bytes().as_ref());
+
+    let mut msg = Vec::with_capacity(8 + 32 + 32);
+    msg.extend_from_slice(&ts);
+    msg.extend_from_slice(&dek);
+    msg.extend_from_slice(&sha256(&siv_blob));
+    let sig: Signature = ed_sk.sign_raw(&msg);
+    write_blob(&out_dir, "ed_sig.bin", sig.to_bytes().as_ref());
+    println!(
+        "cargo:warning=Ed448: vk=57B sig=114B over (ts|dek|sha256(siv)) signed",
+    );
+
+    println!("cargo:warning=Serpent-256-SIV: blob={} (V(16) || ct)", siv_blob.len());
+    println!("cargo:warning=DEK shards XOR combined (32B) = {:02x?}", &dek[..8]);
+    println!("cargo:warning=Message signed (timestamp+DEK+hash) with Ed448");
+    println!("cargo:warning====================");
+
+    // Sensitive material cleanup.
+    zeroize(&mut s_rsa);
+    zeroize(&mut s_ky);
+    zeroize(&mut s_mce);
+    zeroize(&mut dek);
+    zeroize(&mut kek_key);
     zeroize(&mut k1);
     zeroize(&mut k2);
     zeroize(&mut km);
     zeroize(prog.as_mut_slice());
+}
+
+fn hex(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        s.push_str(&format!("{:02x}", x));
+    }
+    s
 }

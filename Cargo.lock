@@ -410,6 +410,7 @@ dependencies = [
  "rand",
  "rsa",
  "serpent",
+ "sha2",
  "sha3 0.10.9",
  "subtle",
  "zeroize",
