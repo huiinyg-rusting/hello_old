@@ -132,6 +132,31 @@ printf '114514\n' | ./hello_old   # piped automation
 
 Before the hour → refused, time remaining shown; at the hour → enter passphrase → 7-layer decryption → ceremonial reveal → press `q` to burn and self-delete.
 
+### Pocket-Sized Storage & Ceremonial TUI
+
+- **Small enough to carry anywhere**: the statically linked binary is only **~945 KB** (under 1 MB) — fits on a thumb drive or in a single message. Slip it in your pocket, mail it to the future.
+- **Zero-dependency, plug and play**: no runtime, no libraries — copy it to any x86_64 Linux machine and run.
+- **Ceremonial full-screen TUI**: unlocking is an audio-visual ritual —
+  - opening full-screen garble flash + scanline sweep (~2 seconds);
+  - six-stage green decryption progress bar;
+  - content revealed character by character with glow trail and live status bar;
+  - press `q` to burn: warning line typed out → block cursor blinks → seven progress bars count down in reverse → red garble flicker → screen clears.
+- **Terminal-adaptive**: full ANSI color support, width auto-fit, cursor/font styling — best on dark terminals.
+
+### More Highlights
+
+- **Passphrase erased on entry**: echoed as `*`, then zeroized from memory the instant it is consumed — never lingers.
+- **Zero-punishment retries**: a wrong passphrase just re-prompts — no lockout, no penalty. Only *tampering* triggers self-destruct, so legit users are treated gently.
+- **Manual NTP fallback**: if every public server is unreachable, it interactively prompts for a custom NTP host — unlockable even offline or behind a firewall.
+- **Signal immunity**: `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT`/`SIGTSTP`/`SIGPIPE` are all ignored; only the watchdog's `SIGKILL` can terminate it — Ctrl+C cannot kill it.
+- **Watchdog, four-fold self-destruct**: stale heartbeat, tracer attachment, in-memory key tampering, or binary modification — any one triggers instant `SIGKILL`.
+- **Triple memory defense**: `mlock` to pin pages, `PROT_NONE` guard pages, volatile zeroization with a memory fence — keys and plaintext live for milliseconds.
+- **Release-grade hardening**: LTO + strip + `panic=abort` + single codegen unit shrink the reverse-engineering surface to a minimum.
+- **Pure client, zero telemetry**: no backend, no logs, no network uploads — running it is privacy by construction.
+- **Piped automation**: `printf 'pass' | ./hello_old` works, so it slots into scripts and CI.
+- **Build-time randomization, anti-fingerprint**: SALT is regenerated every build, so each binary ships different keys — no master key for every door.
+- **Self-deleting to the end**: press `q` and the binary removes itself from disk — not even the program survives.
+
 ### Cracking Difficulty
 
 One must simultaneously break the time gate, the NTP consensus, 11 stacked algorithms, RustyVM key reconstruction, seccomp/memory/anti-debug defenses, and the constant-time side-channel measures — all while every failed attempt risks the whole program self-destructing. No single point yields the key; it exists only in volatile memory, alive for milliseconds. **Unless you hold both kernel-level and hardware-level attack capability, that door stays shut until the hour comes.**

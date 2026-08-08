@@ -88,7 +88,7 @@ fn char_width(c: char) -> usize {
     }
 }
 
-fn display_width(s: &str) -> usize {
+pub fn display_width(s: &str) -> usize {
     let mut w = 0;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -261,8 +261,6 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     hide_cursor();
     let width = term_width();
     let height = term_height();
-    let mut row = 1;
-
     let mut rng = Rng::new();
 
     fill_bg_full(width, height);
@@ -273,26 +271,110 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     draw_status_bar(width, height, unlock_time);
 
     let title = "█ TIME GATE █  OPENING THE DOOR  █ TIME GATE █";
-    reveal_row_fast(row, title, width, height, unlock_time, &mut rng, feed);
-    row += 2;
+    reveal_row_fast(1, title, width, height, unlock_time, &mut rng, feed);
+    draw_hline(3, width, C_CYAN);
 
-    draw_hline(row, width, C_CYAN);
-    row += 1;
+    let body_top = 4;
+    let body_bottom = height.saturating_sub(1);
+    let per_page = body_bottom.saturating_sub(body_top) + 1;
 
+    let mut content: Vec<String> = Vec::new();
     for line in lines {
-        reveal_row_fast(row, line, width, height, unlock_time, &mut rng, feed);
-        row += 1;
+        for chunk in wrap_line(line, width) {
+            content.push(chunk);
+        }
     }
 
-    draw_hline(row, width, C_CYAN);
-    row += 1;
+    let mut idx = 0usize;
+    let mut first = true;
+    let mut quit = false;
+    let mut last_row = body_top;
+    loop {
+        if !first {
+            fill_bg_full(width, height);
+            draw_status_bar(width, height, unlock_time);
+            let tpad = center_pad(title, width);
+            cursor(1, 1);
+            print!(
+                "{}{}{}{}{}{}",
+                C_BG_DARK, C_DIM, " ".repeat(tpad), C_GREEN, title, C_RESET
+            );
+            draw_hline(3, width, C_CYAN);
+        }
+        first = false;
 
-    let foot = "—— 守门人 ——";
-    reveal_row_fast(row, foot, width, height, unlock_time, &mut rng, feed);
-    row += 1;
+        let page_end = (idx + per_page).min(content.len());
+        let mut row = body_top;
+        while idx < page_end {
+            reveal_row_fast(row, &content[idx], width, height, unlock_time, &mut rng, feed);
+            row += 1;
+            idx += 1;
+        }
+        last_row = row.saturating_sub(1);
+        if idx >= content.len() || quit {
+            break;
+        }
+
+        let hint = "  ▸ 按任意键翻页 · 按 q 退出并烧毁  ";
+        let hp = center_pad(hint, width);
+        cursor(body_bottom, 1);
+        print!(
+            "{}{}{}{}{}{}{}",
+            C_BG_DARK, C_DIM, " ".repeat(hp), C_YELLOW, hint,
+            " ".repeat(width.saturating_sub(hp + display_width(hint))), C_RESET
+        );
+        flush();
+        if page_wait(feed) {
+            quit = true;
+        }
+    }
+
+    if !quit {
+        draw_hline(last_row + 1, width, C_CYAN);
+        let foot = "—— 守门人 ——";
+        reveal_row_fast(last_row + 2, foot, width, height, unlock_time, &mut rng, feed);
+        last_row += 2;
+    }
     draw_status_bar(width, height, unlock_time);
     sleep(800);
-    row
+    last_row + 1
+}
+
+/// Wait for a keypress while in raw mode. Returns true if the user pressed q/Q
+/// (requesting burn/exit), false for any other key. Non-tty input advances
+/// immediately so piped/scripted runs never block.
+fn page_wait(feed: &dyn Fn()) -> bool {
+    let tty = io::stdin().is_terminal();
+    if !tty {
+        feed();
+        return false;
+    }
+    let orig = raw_on();
+    loop {
+        unsafe {
+            let mut pfd = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let r = libc::poll(&mut pfd, 1, 100);
+            if r > 0 && (pfd.revents & libc::POLLIN) != 0 {
+                let mut b = [0u8; 1];
+                if io::stdin().read(&mut b).unwrap_or(0) == 0 {
+                    break;
+                }
+                raw_off(&orig);
+                return b[0] == b'q' || b[0] == b'Q';
+            } else if r == 0 {
+                feed();
+                continue;
+            } else {
+                break;
+            }
+        }
+    }
+    raw_off(&orig);
+    false
 }
 
 pub fn burn_with_progress(width: usize, height: usize, feed: &dyn Fn()) {
@@ -609,10 +691,33 @@ fn raw_off(orig: &libc::termios) {
 pub fn center_pad(line: &str, width: usize) -> usize {
     let w = display_width(line);
     if w >= width {
-        0
-    } else {
-        (width - w) / 2
+        return 0;
     }
+    (width - w) / 2
+}
+
+/// Split a line into chunks that each fit within `width` display columns.
+/// Splits on display width (CJK chars count as 2), never mid-char.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 || display_width(line) <= width {
+        return vec![line.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for c in line.chars() {
+        let cw = char_width(c);
+        if cur_w + cw > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(c);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 pub fn wait_for_quit(feed: &dyn Fn()) {
@@ -648,4 +753,108 @@ pub fn wait_for_quit(feed: &dyn Fn()) {
     }
     raw_off(&orig);
     show_cursor();
+}
+
+/// Show a modal confirmation dialog and wait for the confirmation key.
+/// Returns true if the user typed the target letter (case-insensitive),
+/// false for any other key. Non-tty input auto-confirms so scripted runs
+/// proceed without blocking.
+pub fn confirm_dialog(width: usize, height: usize, feed: &dyn Fn(), target: char) -> bool {
+    show_dialog(width, height, feed, target);
+    confirm_burn(feed, target)
+}
+
+/// Wait for the confirmation key while in raw mode. Returns true if the
+/// pressed letter matches `target` (case-insensitive), false for any other
+/// key or non-tty input.
+fn confirm_burn(feed: &dyn Fn(), target: char) -> bool {
+    let tty = io::stdin().is_terminal();
+    if !tty {
+        feed();
+        return true;
+    }
+    let orig = raw_on();
+    loop {
+        unsafe {
+            let mut pfd = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let r = libc::poll(&mut pfd, 1, 100);
+            if r > 0 && (pfd.revents & libc::POLLIN) != 0 {
+                let mut b = [0u8; 1];
+                if io::stdin().read(&mut b).unwrap_or(0) == 0 {
+                    break;
+                }
+                raw_off(&orig);
+                return (b[0] as char).eq_ignore_ascii_case(&target);
+            } else if r == 0 {
+                feed();
+                continue;
+            } else {
+                break;
+            }
+        }
+    }
+    raw_off(&orig);
+    false
+}
+
+/// Draw a centered warning dialog asking the user to type `target` to confirm
+/// the burn. Fills the full background so the dialog reads as a modal overlay.
+fn show_dialog(width: usize, height: usize, feed: &dyn Fn(), target: char) {
+    let up = target.to_ascii_uppercase();
+    let title = " ⚠ 烧毁警告 ";
+    let body = " 密钥与档案即将永久销毁 ";
+    let prompt1 = format!(" 请输入字母  {}  以确认烧毁，", up);
+    let prompt2 = " 按其他任意键返回阅读。";
+
+    let mut inner_w = 6;
+    for l in [title, body, &prompt1, prompt2] {
+        inner_w = inner_w.max(display_width(l) + 2);
+    }
+    let box_w = inner_w + 2;
+    let box_h = 6;
+    let left = width.saturating_sub(box_w) / 2 + 1;
+    let top = height.saturating_sub(box_h) / 2 + 1;
+    let hline = "═".repeat(box_w - 2);
+
+    for r in 1..=height {
+        cursor(r, 1);
+        print!("{}{}{}", C_BG_DARK, " ".repeat(width), C_RESET);
+    }
+
+    let row = |r: usize, s: &str, color: &str| {
+        let sw = display_width(s);
+        let pl = (inner_w - sw) / 2;
+        let pr = inner_w - sw - pl;
+        cursor(r, left);
+        print!(
+            "{}{}{}{}{}{}{}{}{}",
+            C_BG_DARK, color, "║", " ".repeat(pl), s, " ".repeat(pr), "║", C_RESET, C_BG_DARK
+        );
+    };
+
+    cursor(top, left);
+    print!("{}{}{}{}", C_BG_DARK, C_RED, "╔".to_string() + &hline + "╗", C_RESET);
+    row(top + 1, title, C_RED);
+    row(top + 2, body, C_DIM);
+
+    cursor(top + 3, left);
+    let sw = display_width(&prompt1);
+    let pl = (inner_w - sw) / 2;
+    let pr = inner_w - sw - pl;
+    print!("{}{}{}", C_BG_DARK, C_DIM, "║");
+    print!("{}", " ".repeat(pl));
+    let a = &prompt1[..prompt1.find(up).unwrap()];
+    let b = &prompt1[prompt1.find(up).unwrap() + 1..];
+    print!("{}{}{}{}{}", a, C_GREEN, up, C_BRIGHT_WHITE, b);
+    print!("{}{}{}", " ".repeat(pr), "║", C_RESET);
+
+    row(top + 4, prompt2, C_DIM);
+    cursor(top + box_h - 1, left);
+    print!("{}{}{}{}", C_BG_DARK, C_RED, "╚".to_string() + &hline + "╝", C_RESET);
+    flush();
+    feed();
 }

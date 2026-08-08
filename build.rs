@@ -7,7 +7,6 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
-use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
@@ -315,18 +314,22 @@ fn main() {
     zeroize(&mut bk_bytes);
 
     let content = fs::read("read.txt").expect("read.txt missing at package root");
+    // Print the head of the secret so builders can see what the char count maps to.
+    {
+        let head: String = String::from_utf8_lossy(&content[..content.len().min(120)]).into_owned();
+        let head = head.replace('\n', " \\n ");
+        println!("cargo:warning=read.txt head ({} chars): {}", content.len(), head);
+    }
     // Gather file metadata
     let meta = fs::metadata("read.txt").expect("metadata missing");
     let modified = meta.modified().expect("modified time error")
         .duration_since(UNIX_EPOCH).expect("time error").as_secs();
     let created = meta.created().unwrap_or_else(|_| meta.modified().expect("modified time error"))
         .duration_since(UNIX_EPOCH).expect("time error").as_secs();
-    // Get last commit author for read.txt
-    let author_output = Command::new("git")
-        .args(&["log", "-1", "--format=%an", "read.txt"])
-        .output()
-        .expect("git command failed");
-    let author = String::from_utf8_lossy(&author_output.stdout).trim().to_string();
+    // Get the local system user as the author (no git dependency).
+    let author = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
     // Build metadata JSON
     let meta_json = format!(r#"{{"created":{},"modified":{},"author":"{}"}}"#, created, modified, author);
     let meta_bytes = meta_json.as_bytes();
@@ -521,7 +524,15 @@ fn main() {
     dek = xor32(&dek, &s_frodo, &s_dilithium);
 
     // ---- [Algorithm 7] Serpent-256-SIV: authenticated encryption of the payload ----
-    let siv_blob = siv_encrypt_inner(&dek, &ts, &content);
+    // The plaintext is the sealed payload: [meta_len][meta_json][content],
+    // so the reveal can show who created it and when. Rebuild it here since
+    // the earlier copy was zeroized after payload.bin was written.
+    let mut sealed_payload = Vec::with_capacity(4 + meta_bytes.len() + content.len());
+    sealed_payload.extend_from_slice(&meta_len.to_le_bytes());
+    sealed_payload.extend_from_slice(&meta_bytes);
+    sealed_payload.extend_from_slice(&content);
+    let siv_blob = siv_encrypt_inner(&dek, &ts, &sealed_payload);
+    zeroize(&mut sealed_payload);
     write_blob(&out_dir, "serpent_siv.bin", &siv_blob);
     // Store ciphertext length for display / parsing.
     let siv_len = (siv_blob.len() as u32).to_le_bytes();

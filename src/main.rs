@@ -175,6 +175,38 @@ fn open_date_string() -> String {
     format!("{:04}-{:02}-{:02}", y, mo, d)
 }
 
+/// Parse the embedded metadata JSON `{"created":..,"modified":..,"author":".."}`
+/// into human-readable display lines.
+fn parse_meta(meta: &[u8]) -> Vec<String> {
+    let s = String::from_utf8_lossy(meta);
+    let s = s.trim().trim_start_matches('{').trim_end_matches('}');
+    let mut created = None;
+    let mut modified = None;
+    let mut author = String::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("\"created\":") {
+            created = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = part.strip_prefix("\"modified\":") {
+            modified = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = part.strip_prefix("\"author\":\"") {
+            author = v.trim_end_matches('"').trim().to_string();
+        }
+    }
+    let mut lines = Vec::new();
+    lines.push("── 档案信息 · SEALED RECORD ──".to_string());
+    if let Some(c) = created {
+        lines.push(format!("创建 / Created   {}", format_unix(c)));
+    }
+    if let Some(m) = modified {
+        lines.push(format!("修改 / Modified  {}", format_unix(m)));
+    }
+    if !author.is_empty() {
+        lines.push(format!("作者 / Author    {}", author));
+    }
+    lines
+}
+
 fn refuse(lines: &[String], feed: &dyn Fn()) -> ! {
     let unlock_time = format_unix(shared::OPEN_TIMESTAMP_UNIX_SECONDS);
     tui::show(lines, feed, &unlock_time);
@@ -723,22 +755,42 @@ fn main() {
         .expect("SIV decrypt failed");
     crypto::zeroize(&mut combined_dek);
 
+    // The sealed payload is [meta_len][meta_json][text]; pull out the metadata.
+    let mut meta_lines: Vec<String> = Vec::new();
+    let mut text = Vec::new();
+    if content.len() >= 4 {
+        let meta_len = u32::from_le_bytes([content[0], content[1], content[2], content[3]]) as usize;
+        if content.len() >= 4 + meta_len {
+            let meta_json = &content[4..4 + meta_len];
+            meta_lines = parse_meta(meta_json);
+            text.extend_from_slice(&content[4 + meta_len..]);
+        } else {
+            text.extend_from_slice(&content[4..]);
+        }
+    } else {
+        text.extend_from_slice(&content);
+    }
+
     // Copy content into secure buffer
     beat();
     unsafe {
-        std::ptr::copy_nonoverlapping(content.as_ptr(), content_buf.ptr, content.len());
+        std::ptr::copy_nonoverlapping(text.as_ptr(), content_buf.ptr, text.len());
     }
-    crypto::flush_mem(content_buf.ptr, content.len());
+    crypto::flush_mem(content_buf.ptr, text.len());
+    crypto::zeroize(content.as_mut_slice());
 
     fx.finish(&beat);
 
     // Success sequence and display
     success_sequence(&beat);
 
-    let text = unsafe { std::slice::from_raw_parts(content_buf.ptr, content.len()) };
-    let text = String::from_utf8_lossy(text).into_owned();
+    let revealed = unsafe { std::slice::from_raw_parts(content_buf.ptr, text.len()) };
+    let revealed = String::from_utf8_lossy(revealed).into_owned();
     let mut all = report;
-    for line in text.lines() {
+    for line in meta_lines {
+        all.push(line);
+    }
+    for line in revealed.lines() {
         all.push(line.to_string());
     }
 
@@ -747,7 +799,7 @@ fn main() {
     let rows0 = tui::show(&all, &beat, &unlock_time);
     let width = tui::term_width();
 
-    let hint = "Press q to burn and exit";
+    let hint = " ▸ 按 q 退出并烧毁 · 按其他键继续阅读 ";
     let hr = rows0 + 1;
     let hpad = tui::center_pad(hint, width);
     tui::hide_cursor();
@@ -756,11 +808,29 @@ fn main() {
         hr, 1,
         C_BG_DARK, "\x1b[2m",
         format!("{}{}", " ".repeat(hpad), hint),
-        " ".repeat(width.saturating_sub(hpad + hint.len())),
+        " ".repeat(width.saturating_sub(hpad + display_width(hint))),
         C_RESET
     );
     flush_stdout();
-    tui::wait_for_quit(&beat);
+
+    loop {
+        tui::wait_for_quit(&beat);
+
+        let target = (b'A' + (tui::Rng::new().next_u64() % 26) as u8) as char;
+        if tui::confirm_dialog(width, height, &beat, target) {
+            break;
+        }
+        tui::hide_cursor();
+        print!(
+            "\x1b[{};{}H{}{}{}{}{}",
+            hr, 1,
+            C_BG_DARK, "\x1b[2m",
+            format!("{}{}", " ".repeat(hpad), hint),
+            " ".repeat(width.saturating_sub(hpad + display_width(hint))),
+            C_RESET
+        );
+        flush_stdout();
+    }
 
     watchdog::stop();
     let height = tui::term_height();
@@ -771,8 +841,10 @@ fn main() {
     // Zeroize content before exit
     crypto::zeroize(content.as_mut_slice());
 
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(exe);
+    if std::env::var("NO_SELF_DESTRUCT").is_err() {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::fs::remove_file(exe);
+        }
     }
 }
 
@@ -784,4 +856,4 @@ fn flush_stdout() {
     let _ = std::io::stdout().flush();
 }
 
-use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE, C_BG_DARK};
+use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE, C_BG_DARK, display_width};
