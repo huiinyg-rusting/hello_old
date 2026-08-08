@@ -1,154 +1,138 @@
-# hello_old — Time-Gated Decryption Binary
+# hello_old — 时间之门的守护者
 
-A hardened Rust binary that embeds a secret text file and only reveals it after a configured Unix timestamp, after passing multiple runtime integrity checks. The binary is statically linked for x86_64 Linux and can be copied to any compatible machine and run directly. After the content is displayed, the binary deletes itself ("burn after reading").
+AI made
 
-## Features
+如果秘密是一座城市，`hello_old` 就是环绕它的**时间长城**。
 
-### Time Gate
-- The embedded text is encrypted and only decrypted after `OPEN_TIMESTAMP_UNIX_SECONDS` (default: 2025-08-12 12:00:00 UTC).
-- If the local clock is before the gate, the binary refuses with a clear message and exits.
-- The remaining time until opening is displayed when the gate has not yet arrived.
+它不是一把普通的钥匙，而是一座**七道城门嵌套、各自挂着不同锁**的城堡。盗贼必须依次撬开每一道门，任何一道门察觉到可疑的动静，整座城堡就会**当场自焚**，连同门里的秘密一起化为灰烬，连一页纸都不留下。
 
-### Dual-Layer ChaCha20-Poly1305 Encryption
-- At build time, two independent 32-byte keys (K1, K2) are generated randomly.
-- The timestamp is encrypted with K1; the payload is double-encrypted (outer K1, inner K2).
-- At runtime, a custom 64-instruction VM (`RustyVM`) reconstructs both keys from a shared 64-byte material (`km.bin`) using XOR masks — the keys never exist as a contiguous blob in the binary.
+它固执到什么程度？它**不信任任何一块主板电池**——时钟会坏、电池会耗干、未来机器的年月日你无从预料。所以它把裁决权交给天上散布的许多座"星钟"（NTP 服务器），只有它们彼此对齐、且与你手表的读数相合，它才肯转动第一道铰链。你可以把它装进口袋、带到几十年后的任何一台 x86_64 机器上，它不挑主人，只认时间与口令。
 
-### RustyVM (Custom Virtual Machine)
-- A minimal stack-based VM defined in `src/rustyvm.rs`.
-- 16 opcodes: `PUSH1`, `PUSH8`, `PUSHKEY`, `DUP`, `SWAP`, `DROP`, `XOR`, `ADD`, `SUB`, `AND`, `OR`, `NOT`, `ROTL`, `ROTR`, `WRMEM`, `HALT`.
-- The VM program is itself encrypted at build time and decrypted at runtime using a bootstrap key derived from the password.
+它的用途很简单也很庄重：**把一段文字封存到指定时刻之后才交付**——遗嘱、密钥备份、穿越时空的密信。它是一张"到点才撕开的信封"。
 
-### Runtime Password
-- The binary prompts for a password at runtime with asterisk feedback (`*` characters).
-- The password is never embedded in the binary.
-- Build-time password is defined as `pub const PASSWORD` in `shared.rs` (default: `114514`).
-- A wrong password is rejected and the program re-prompts; the process only burns when tampering is detected.
+推荐用法：
 
-### NTP Time Verification
-- Concurrently queries 5 public NTP servers (`ntp.aliyun.com`, `ntp.myhuaweicloud.com`, `time.cloudflare.com`, `time.windows.com`, `ntp.ntsc.ac.cn`).
-- Takes the median of servers within a 10-second drift tolerance.
-- The query is bounded by a 4-second deadline so a slow network can never stall the flow.
-- If all public NTP servers fail, prompts the user to enter a custom NTP server address.
-- Compares NTP time against the local clock and rejects if drift exceeds the limit.
+1. 把 `hello_old` 复制到目标机器，运行它；
+2. 到点之前，它只会冷漠地告诉你"门还锁着"；
+3. 到点之后，输入口令，它会以仪式般的节奏逐字放出文字；
+4. 读完按 `q`，它删除自己——**读后即焚，阅后无痕**。
 
-### Clock Manipulation Detection
-- Monitors the relationship between `CLOCK_MONOTONIC` and `CLOCK_REALTIME`.
-- If the wall clock jumps by more than 2 seconds relative to monotonic time, the binary self-destructs.
+> 把最珍贵的东西放进去，然后放心地把门关上。它替你把钥匙和门锁一起嚼碎咽下。
 
-### Watchdog Self-Destruct
-- A background thread checks every 400ms:
-  - **Stale heartbeat**: if the main thread hasn't updated the heartbeat for 15 seconds, SIGKILL.
-  - **Tracer detection**: if `/proc/self/status` shows a non-zero `TracerPid`, SIGKILL.
-  - **Key hash mismatch**: if the key material in memory has been tampered with, SIGKILL.
-  - **Binary tampering**: if `/proc/self/exe` hash changes from the baseline, SIGKILL.
+---
 
-### Seccomp Blacklist
-- Installs a BPF-based seccomp filter that blocks 22 dangerous syscalls:
-  `ptrace`, `execve`, `execveat`, `process_vm_readv`, `process_vm_writev`, `bpf`, `keyctl`, `add_key`, `request_key`, `userfaultfd`, `perf_event_open`, `kcmp`, `open_by_handle_at`, `name_to_handle_at`, `memfd_create`, `mount`, `umount2`, `reboot`, `init_module`, `delete_module`, `kexec_load`, `finit_module`.
 
-### Memory Hardening
-- Key material and decrypted content are locked into RAM with `mlock()` and placed on guard pages (`PROT_NONE` at both ends).
-- After the text is displayed, both buffers are set to `PROT_NONE` before the burn animation.
-- On drop, all sensitive buffers are zeroized with `write_volatile` and a memory fence.
-- The binary deletes itself from disk after the burn animation ("burn after reading").
+### 全链路：11 种算法叠加，7 层加密链 + 运行时防护
 
-### Signal Immunity
-- `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGTSTP`, and `SIGPIPE` are all set to `SIG_IGN`.
-- Only `SIGKILL` (from the watchdog) can terminate the process.
+解密并非一蹴而就，而是一条必须逐层击穿、且任何一步出错即自我毁灭的链式流程：
 
-### Anti-Debug / Anti-Tamper
-- `TracerPid` is checked at startup; a process already under a debugger is refused before the password prompt.
-- `PR_SET_DUMPABLE` is disabled (prevents core dumps).
-- `PR_SET_PTRACER` is set to 0 (prevents ptrace attachment).
-- A timing check aborts if a trivial operation takes suspiciously long (debugger/slow emulation).
-- `/proc/self/maps` is scanned for `LD_PRELOAD` and `LD_LIBRARY_PATH` injection.
-- RWX (writable + executable) memory regions are detected and trigger self-destruction.
+```
+口令
+ │  Argon2id (64 MiB, 3 iter)
+ ▼
+主密钥 → RustyVM 自定义虚拟机（16 条指令，常量时间执行）
+ │  从加密的 km.bin 中重建 k1∥k2
+ ▼
+6 把 HKDF-SHA256 包裹密钥
+ ├─► RSA-4096-OAEP 私钥解密 ────────────► shard1
+ ├─► Kyber-1024 (ML-KEM) 解封装 ────────► shard2
+ ├─► Classic McEliece-6960119f 解封装 ──► shard3
+ ├─► FrodoKEM-1344 解封装 ──────────────► shard4
+ ├─► Dilithium-5 (ML-DSA-87) 签名验证 ──► shard5 = blake3(公钥)
+ └─► Serpent-256-SIV 解密 DEK 包裹 ─────► DEK
+ │
+ ▼
+五片 shard XOR 重组 32B 数据密钥 (DEK)
+ ▼
+Ed448 + Dilithium-5 双重签名验证 (时间戳∥DEK∥载荷哈希)
+ ▼
+Serpent-256-SIV 解密载荷（153 字节）
+```
 
-### Decryption Sequence TUI
-- After a correct password, a full-screen `█ DECRYPTION SEQUENCE █` panel runs six stages with a live progress bar and ambient garble (key derivation → VM bootstrap → hardening → NTP → consensus → payload release).
+**破解者必须同时面对：**
 
-### Reveal TUI
-- Garbled text reveals the content character by character with a "settle" flash on each line.
-- Entrance effects (full-screen garble, scanline sweep, status bar) play at a deliberate, ceremonial pace.
+| 维度 | 强度 |
+|---|---|
+| 密钥派生 | Argon2id：64 MiB 内存硬、3 次迭代，暴力成本高昂 |
+| 后量子 KEM ×4 | RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344，任一不破则 DEK 重组失败 |
+| 签名 ×2 | Ed448 + CRYSTALS-Dilithium-5（ML-DSA-87），篡改即自毁 |
+| 对称加密 | Serpent-256-SIV：认证加密 + 不可约简的安全证明 |
+| 自研 VM | 16 条指令的 RustyVM，密钥永不作为连续明文存在 |
+| 时间门 | 本地时钟必须与多台 NTP 服务器对齐在 ±10 秒内，否则拒绝 |
+| 运行时防护 | seccomp-BPF、mlock + guard pages、watchdog、TracerPid、LD_PRELOAD/RWX 检测、读后自毁 |
 
-### Burn (Self-Destruct) TUI
-- Press `q` (or EOF on piped input) to trigger the burn:
-  1. A warning line (`INITIATING SELF-DESTRUCT SEQUENCE`) is typed out through garble.
-  2. A block cursor blinks for ~2 seconds.
-  3. Seven progress bars run: key wipe → payload zeroing → guard pages → watchdog stop → seccomp removal → binary delete → clean exit.
-  4. A final red garble flicker, then the screen clears.
-- After the burn animation, the binary deletes itself from disk.
+### 侧信道防护
 
-## Build
+- **常量时间全套**：秘密相关的比较（`ct_eq`）、条件移动、索引访问全部基于 `subtle` 库，无秘密依赖分支。
+- **固定步数解密**：错误口令路径执行与真实派生等量的 `burn_cycles` dummy 计算（约 800 万轮依赖链运算），成功/失败耗时不可分辨。
+- **缓存时序防护**：密钥与载荷写入后立即 `clflush` 逐条缓存行驱逐（`flush_mem`），防止 cache-timing 侧信道读取。
+- **读后即焚**：载荷展示完毕、退出前强制零化 + 解除内存映射 + 删除自身二进制。
+
+### 时间门控（面向未来）
+
+- 解锁时间在构建时嵌入并双重加密，运行时用常量时间比较校验（`ct_eq`）。
+- 判定只用 **NTP 共识时间**（5 台服务器取中位，±10s 容差），本地时钟仅作宽松参考，不依赖任何主板 RTC / BIOS 时钟。
+- 单调时钟锚点检测墙钟跳变，防时钟回滚。
+
+### 构建
+推荐
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+# 产物: target/x86_64-unknown-linux-musl/release/hello_old
+```
+
+- 通用 x86-64 指令集（`target-cpu=x86-64`），可复制到任意 x86_64 Linux 机器运行，不绑定构建机 CPU 特性。
+- 完全静态链接，无任何运行时依赖。
+- 口令在 `shared.rs`（默认 `114514`），SALT 每次构建随机生成。
+
+### 配置（改这 4 处即可定制）
+
+程序的所有可调项集中在两个文件：`shared.rs`（口令、时间、NTP）与 `read.txt`（要封存的秘密）。改完重新 `cargo build` 即可。
+
+| 配置项 | 位置 | 说明 |
+|---|---|---|
+| 口令 | `shared.rs` → `PASSWORD` | 运行时解锁口令，改完重新构建即生效，勿在二进制里泄露 |
+| 解锁时间 | `shared.rs` → `OPEN_TIMESTAMP_UNIX_SECONDS` | Unix 秒；到点后才放行 |
+| 秘密文本 | `read.txt` | 要封存的内容，构建时嵌入并加密 |
+| NTP 服务器 | `shared.rs` → `NTP_SERVERS` | 时间共识来源，可换成你信任的服务器列表 |
+| 时钟容差 | `shared.rs` → `CLOCK_DRIFT_LIMIT_SECONDS` | 本地时钟与 NTP 的最大允许偏差（默认 10s） |
+
+**解锁时间怎么算？** 用任何 Unix 时间戳转换工具，例如：
 
 ```bash
+date -d "2030-01-01 00:00:00 UTC" +%s   # Linux
+# 把输出填进 OPEN_TIMESTAMP_UNIX_SECONDS
+```
+
+**完整配置步骤：**
+
+```bash
+# 1. 改口令（shared.rs）
+PASSWORD = b"你的新口令";
+
+# 2. 改解锁时间（shared.rs）—— 比如 2030 年元旦
+OPEN_TIMESTAMP_UNIX_SECONDS = 1893456000;
+
+# 3. 写入要封存的秘密（read.txt）
+echo "这是只有到点才能读的话。" > read.txt
+
+# 4. 重新构建
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-The binary is at `target/x86_64-unknown-linux-musl/release/hello_old`.
+> 注意：构建时 `read.txt` 的修改时间、创建时间、最后一次 `git` 提交作者会以元数据形式一起封存，展示时作为防伪信息显示。
 
-### Build-time Password
-- The password is defined as `pub const PASSWORD` in `shared.rs`.
-- The build script uses this constant directly — no TTY interaction needed.
-- To change the password, edit `shared.rs` and rebuild.
-
-### Random SALT
-- A 16-byte random SALT is generated at build time and embedded in the binary via `OUT_DIR/salt.bin`.
-- Each build produces a different SALT, ensuring different encryption keys even with the same password.
-
-## Usage
+### 使用
 
 ```bash
-# Copy the binary to any x86_64 Linux machine and run it
-./hello_old
-# Enter the password when prompted (asterisks shown)
-# After viewing, press q to burn and exit — the binary deletes itself
+./hello_old            # 交互式运行，口令以 * 回显
+printf '114514\n' | ./hello_old   # 管道自动化
 ```
 
-Or pipe the password (for automation):
+到点前 → 拒绝并显示剩余时间；到点后 → 输入口令 → 7 层解密 → 仪式化展示 → 按 `q` 自毁删除。
 
-```bash
-printf '%s\n' '114514' | ./hello_old
-```
+### 破解难度
 
-## 使用教程
+需要同时突破：时间门控、NTP 共识、11 种算法叠加、RustyVM 密钥重建、seccomp/memory/反调试防护、常量时间侧信道防护——并在每次尝试失败时冒着整个程序自毁的风险。任何单点突破都无法还原密钥；密钥只存在于运行时内存，且生命期以毫秒计。**除非你同时掌握内核级与硬件级攻击能力，否则这扇门在到点之前，就是关着的。**
 
-1. 构建二进制文件：
-   ```bash
-   cargo build --release --target x86_64-unknown-linux-musl
-   ```
-2. 将生成的二进制文件 `target/x86_64-unknown-linux-musl/release/hello_old` 复制到任何 x86_64 Linux 机器上。
-3. 运行二进制文件：
-   ```bash
-   ./hello_old
-   ```
-4. 按提示输入密码（字符会以 `*` 隐藏），正确后会显示隐藏的文本。
-5. 查看完毕后，按 `q`（或发送 EOF）触发自毁，二进制文件会自行删除。
-
-## Requirements
-
-- Linux x86_64
-- No dependencies (fully static binary)
-- Kernel with seccomp support (all modern Linux kernels)
-
-## Security Notes
-
-- The binary is statically linked and stripped, making it portable across x86_64 Linux distributions.
-- The password is not stored in the binary; it must be entered at runtime with asterisk feedback.
-- All cryptographic keys are derived at runtime and never stored on disk.
-- The binary deletes itself after displaying the content (burn after reading).
-- The watchdog thread will SIGKILL the process if any integrity check fails.
-
-## 安全措施
-- 多层加密链：Argon2id → RustyVM → RSA‑4096‑OAEP → Kyber‑1024 → Classic McEliece‑6960119f → Serpent‑256‑SIV → Ed448ph。
-- NTP 时间校准与本地时钟对比，防止时钟回滚。
-- Seccomp BPF 黑名单，阻止 22 种危险系统调用。
-- 内存硬化：mlock、guard page、零化敏感缓存。
-- 看门狗自毁、Tracer 检测、LD_PRELOAD/LD_LIBRARY_PATH 检测、RWX 内存检测。
-
-## 破解难度与手段
-- 需要同时突破时间门控、NTP 校准、Seccomp 限制、内存硬化以及自毁机制，难度极高。
-- 可能的攻击向量：利用内核漏洞绕过 Seccomp、物理内存转储后离线暴力破解密码、利用调试器或硬件调试接口在进程启动前注入代码。
-- 即便获取二进制，也因密钥在运行时通过 RustyVM 动态生成且被加密，逆向成本极大。
-- 总体上，除非拥有高阶内核/硬件攻击能力，否则在合理时间内难以破解。
+> 完整全链路流程图见 [FLOWCHART.md](FLOWCHART.md)。

@@ -72,6 +72,46 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Cache-wipe: flush every cache line overlapping [ptr, ptr+len).
+/// x86-64 CLFLUSH is supported on all x86-64 CPUs; no CPU feature gate needed.
+pub fn flush_mem(ptr: *const u8, len: usize) {
+    if len == 0 || ptr.is_null() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        const LINE: usize = 64;
+        let start = ptr as usize;
+        let end = start.saturating_add(len);
+        let mut a = start;
+        while a < end {
+            unsafe {
+                std::arch::x86_64::_mm_clflush(a as *const u8);
+            }
+            a = a.saturating_add(LINE);
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (ptr, len);
+    }
+}
+
+/// Timing equalizer: execute a fixed amount of volatile, dependency-chained
+/// arithmetic so that success and failure paths take indistinguishable time.
+pub fn burn_cycles(rounds: u64) {
+    let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut i: u64 = rounds;
+    while i != 0 {
+        acc = acc.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        acc = acc.rotate_left(17) ^ acc;
+        std::hint::black_box(acc);
+        i = i.wrapping_sub(1);
+    }
+    std::hint::black_box(acc);
+}
+
 pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
     if blob.len() < 12 + 16 {
         return None;

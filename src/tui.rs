@@ -186,7 +186,7 @@ fn reveal_row_fast(row: usize, line: &str, width: usize, height: usize, unlock_t
         );
         draw_status_bar(width, height, unlock_time);
         flush();
-        sleep(15);
+        sleep(10);
         if i % 3 == 0 {
             feed();
         }

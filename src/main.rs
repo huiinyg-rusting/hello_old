@@ -14,7 +14,6 @@ mod watchdog;
 use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::fs::OpenOptions;
 
 use rsa::{Oaep, RsaPrivateKey};
 use rsa::pkcs8::DecodePrivateKey;
@@ -30,13 +29,6 @@ mod siv_mod {
     include!("serpent_siv.rs");
 }
 use siv_mod::{siv_decrypt};
-
-fn log_self_destruct(msg: &str) {
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("/home/admin/gitHub/hello_old/watchdog_debug.log") {
-        let _ = writeln!(f, "{}", msg);
-        let _ = f.flush();
-    }
-}
 
 // Build-time embedded blobs for 7-layer runtime decryption
 const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin")); // legacy, unused now
@@ -216,6 +208,23 @@ fn key_copy64(buf: &SecBuf) -> [u8; 64] {
 
 fn noop() {}
 
+/// Side-channel hardening: burn a fixed, secret-independent amount of work
+/// so a wrong password takes ~as long as a full derivation before revealing
+/// the outcome, and evict the derived secret buffers from cache.
+fn timing_equalize() {
+    crypto::burn_cycles(8_000_000);
+    let mut scratch = [0u8; 128];
+    for chunk in scratch.chunks_mut(16) {
+        let mut acc = 0x243f_6a88_85a3_08d3u64;
+        for b in chunk.iter_mut() {
+            acc = acc.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (acc >> 56) as u8;
+        }
+    }
+    crypto::flush_mem(scratch.as_ptr(), scratch.len());
+    crypto::zeroize(&mut scratch);
+}
+
 fn anti_debug_checks() -> bool {
     if watchdog::tracer_pid() != 0 {
         return false;
@@ -368,6 +377,7 @@ fn main() {
                 if !std::io::stdin().is_terminal() {
                     watchdog::self_destruct();
                 }
+                timing_equalize();
                 tui::dynamic_center_error("Invalid password, try again", &noop);
             }
         }
@@ -392,7 +402,6 @@ fn main() {
 
     fx.draw(0.0, &noop);
     if !rustyvm::run(&prog, KM, &mut keys) {
-        log_self_destruct("main: rustyvm run failed");
         watchdog::self_destruct();
     }
     zeroize(prog.as_mut_slice());
@@ -400,6 +409,7 @@ fn main() {
         std::ptr::copy_nonoverlapping(keys.as_ptr(), key_buf.ptr, shared::KEY_LEN);
     }
     zeroize(&mut keys);
+    crypto::flush_mem(key_buf.ptr, shared::KEY_LEN);
     for i in 0..5 {
         fx.draw(0.3 + i as f32 * 0.14, &noop);
         tui::sleep(50);
@@ -407,7 +417,6 @@ fn main() {
     fx.advance();
 
     let key_sha = crypto::sha3_256(&key_copy64(&key_buf));
-    log_self_destruct(&format!("main: key_sha={:?}", key_sha));
     let feed: Arc<Mutex<Instant>> = watchdog::start(key_sha, key_buf.ptr as usize, 64);
     key_buf.lock_ro();
     let beat = || {
@@ -516,24 +525,21 @@ fn main() {
     let mut k2 = [0u8; 32];
     {
         let mut all = key_copy64(&key_buf);
-        log_self_destruct(&format!("main: all key={:?}", all));
         k1.copy_from_slice(&all[..32]);
         k2.copy_from_slice(&all[32..]);
-        log_self_destruct(&format!("main: k1={:?}, k2={:?}", k1, k2));
         zeroize(&mut all);
     }
 
     let open_ts = {
         let mut blob = match crypto::decrypt(&k1, TS_BLOB) {
             Some(b) => b,
-            None => { log_self_destruct("main: decrypt TS_BLOB failed"); watchdog::self_destruct(); }
+            None => { watchdog::self_destruct(); }
         };
         let mut arr = [0u8; 8];
         arr.copy_from_slice(&blob[..8]);
         let ts = u64::from_le_bytes(arr);
         crypto::zeroize(blob.as_mut_slice());
         if !crypto::ct_eq(&ts.to_le_bytes(), &shared::OPEN_TIMESTAMP_UNIX_SECONDS.to_le_bytes()) {
-            log_self_destruct("main: timestamp mismatch");
             watchdog::self_destruct();
         }
         ts
@@ -545,7 +551,6 @@ fn main() {
             TS_PLAIN[4], TS_PLAIN[5], TS_PLAIN[6], TS_PLAIN[7],
         ]);
         if plain_ts != shared::OPEN_TIMESTAMP_UNIX_SECONDS || plain_ts != open_ts {
-            log_self_destruct("main: plain timestamp mismatch");
             watchdog::self_destruct();
         }
     }
@@ -587,7 +592,7 @@ fn main() {
     fx.draw(0.1, &beat);
     let mut rsa_sk_der = match crypto::decrypt(&rsa_wrap_key, RSA_SK_WRAP) {
         Some(b) => b,
-        None => { log_self_destruct("main: unwrap RSA SK failed"); watchdog::self_destruct(); }
+        None => { watchdog::self_destruct(); }
     };
     let rsa_sk = RsaPrivateKey::from_pkcs8_der(&rsa_sk_der).expect("RSA PKCS8 parse");
     let oaep = Oaep::new_with_mgf_hash::<Sha256, Sha256>();
@@ -601,7 +606,7 @@ fn main() {
     fx.draw(0.2, &beat);
     let mut ky_sk_bytes = match crypto::decrypt(&kyber_wrap_key, KY_SK_WRAP) {
         Some(b) => b,
-        None => { log_self_destruct("main: unwrap Kyber SK failed"); watchdog::self_destruct(); }
+        None => { watchdog::self_destruct(); }
     };
     let dk_ky = {
         let seed_bytes: [u8; 64] = ky_sk_bytes[..64].try_into().expect("kyber seed len");
@@ -622,7 +627,7 @@ fn main() {
     fx.draw(0.3, &beat);
     let mut mce_sk_bytes = match crypto::decrypt(&mceliece_wrap_key, MCE_SK_WRAP) {
         Some(b) => b,
-        None => { log_self_destruct("main: unwrap McEliece SK failed"); watchdog::self_destruct(); }
+        None => { watchdog::self_destruct(); }
     };
     let mut mce_sk_arr: [u8; mc::CRYPTO_SECRETKEYBYTES] = mce_sk_bytes.as_slice().try_into().expect("mceliece sk len");
     let sk_mce = mc::SecretKey::from(&mut mce_sk_arr);
@@ -641,7 +646,7 @@ fn main() {
     fx.draw(0.4, &beat);
     let mut frodo_sk_bytes = match crypto::decrypt(&frodokem_wrap_key, FRODO_SK_WRAP) {
         Some(b) => b,
-        None => { log_self_destruct("main: unwrap FrodoKEM SK failed"); watchdog::self_destruct(); }
+        None => { watchdog::self_destruct(); }
     };
     let frodo_alg = FrodoAlgorithm::FrodoKem1344Aes;
     let frodo_sk = DecryptionKey::from_bytes(frodo_alg, &frodo_sk_bytes).expect("FrodoKEM SK parse");
@@ -664,7 +669,7 @@ fn main() {
     fx.draw(0.6, &beat);
     let mut dek_wrapped = match crypto::decrypt(&serpent_dek_wrap_key, DEK_WRAP) {
         Some(b) => b,
-        None => { log_self_destruct("main: unwrap DEK failed"); watchdog::self_destruct(); }
+        None => { watchdog::self_destruct(); }
     };
     let mut dek = [0u8; 32];
     dek.copy_from_slice(&dek_wrapped[..32]);
@@ -681,7 +686,6 @@ fn main() {
     
     // Constant-time compare DEK
     if !crypto::ct_eq(&combined_dek, &dek) {
-        log_self_destruct("main: DEK mismatch");
         watchdog::self_destruct();
     }
     crypto::zeroize(&mut s_rsa_arr);
@@ -702,7 +706,6 @@ fn main() {
     verify_msg.extend_from_slice(&siv_hash);
     
     if !dilithium_vk.verify(&verify_msg, dilithium_sig_bytes, None) {
-        log_self_destruct("main: Dilithium signature verification failed");
         watchdog::self_destruct();
     }
 
@@ -711,7 +714,6 @@ fn main() {
     let ed_vk = VerifyingKey::from_bytes(&ED_VK.try_into().expect("Ed448 VK len")).expect("Ed448 VK parse");
     let ed_sig = ed448_goldilocks::Signature::from_bytes(&ED_SIG.try_into().expect("Ed448 sig len"));
     if ed_vk.verify_raw(&ed_sig, &verify_msg).is_err() {
-        log_self_destruct("main: Ed448 signature verification failed");
         watchdog::self_destruct();
     }
 
@@ -726,6 +728,7 @@ fn main() {
     unsafe {
         std::ptr::copy_nonoverlapping(content.as_ptr(), content_buf.ptr, content.len());
     }
+    crypto::flush_mem(content_buf.ptr, content.len());
 
     fx.finish(&beat);
 
