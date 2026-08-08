@@ -35,20 +35,25 @@ master key → RustyVM custom VM (16 opcodes, constant-time execution)
  │  reconstructs k1∥k2 from encrypted km.bin
  ▼
 6 HKDF-SHA256 wrapping keys
- ├─► RSA-4096-OAEP private-key decrypt ──► shard1
- ├─► Kyber-1024 (ML-KEM) decapsulate ─────► shard2
- ├─► Classic McEliece-6960119f decapsulate► shard3
- ├─► FrodoKEM-1344 decapsulate ──────────► shard4
- ├─► Dilithium-5 (ML-DSA-87) verify ──────► shard5 = blake3(pubkey)
- └─► Serpent-256-SIV unwrap DEK ─────────► DEK
- │
- ▼
-five shards XOR-combined into the 32-byte Data Encryption Key (DEK)
- ▼
-Ed448 + Dilithium-5 dual signature verify (ts∥DEK∥payload-hash)
- ▼
-Serpent-256-SIV decrypt payload (153 bytes)
-```
+  ├─► RSA-4096-OAEP private-key decrypt ──► shard1
+  ├─► Kyber-1024 (ML-KEM) decapsulate ─────► shard2
+  ├─► Classic McEliece-6960119f decapsulate► shard3
+  ├─► FrodoKEM-1344 decapsulate ──────────► shard4
+  ├─► Dilithium-5 (ML-DSA-87) verify ──────► shard5 = blake3(pubkey)
+  ├─► SM3-256 (Chinese national hash) ────► shard6 = sm3(pubkey)
+  └─► Serpent-256-SIV unwrap DEK ─────────► DEK
+  │
+  ▼
+  six shards XOR-combined into the 32-byte Data Encryption Key (DEK) ①
+  ▼
+  Ed448 + Dilithium-5 dual signature verify (ts∥DEK∥payload-hash)
+  ▼
+  Serpent-256-SIV decrypt payload
+  ```
+
+  ① `RSA ⊕ Kyber ⊕ McEliece ⊕ FrodoKEM ⊕ SHA3-256(Dilithium VK) ⊕ SM3-256(Dilithium VK)`
+  → 256-bit DEK. The last two shards hash the *same* Dilithium public key with two independent
+  primitives (BLAKE3 + SM3); defeating one hash still leaves the other, so DEK recombination fails.
 
 **An attacker must simultaneously defeat:**
 

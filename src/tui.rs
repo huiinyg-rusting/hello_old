@@ -257,7 +257,7 @@ fn draw_progress_bars_all(width: usize, height: usize, measures: &[(&str, f32)],
     feed();
 }
 
-pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
+pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> bool {
     hide_cursor();
     let width = term_width();
     let height = term_height();
@@ -272,84 +272,135 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
 
     let title = "█ TIME GATE █  OPENING THE DOOR  █ TIME GATE █";
     reveal_row_fast(1, title, width, height, unlock_time, &mut rng, feed);
+    reveal_row_fast(2, &"──".to_string(), width, height, unlock_time, &mut rng, feed);
     draw_hline(3, width, C_CYAN);
 
     let body_top = 4;
-    // Reserve the bottom rows so footer/hint never collide with content or
-    // scroll off-screen.
-    let foot_row = height.saturating_sub(1);
-    let hline_row = height.saturating_sub(2);
     let body_bottom = height.saturating_sub(3);
     let per_page = body_bottom.saturating_sub(body_top) + 1;
 
+    // Pre-wrap every line into display-width chunks that fit the terminal, then
+    // group them into fixed-size pages. Pages are reused verbatim on repaint so
+    // going "back" does not re-animate the reveal — it just re-renders the same
+    // buffered text, which is instantaneous and keeps the story stable on screen
+    // after a wrong-letter cancel.
     let mut content: Vec<String> = Vec::new();
     for line in lines {
         for chunk in wrap_line(line, width) {
             content.push(chunk);
         }
     }
+    let mut pages: Vec<Vec<usize>> = Vec::new();
+    let mut i = 0;
+    while i < content.len() {
+        let end = (i + per_page).min(content.len());
+        pages.push((i..end).collect());
+        i = end;
+    }
+    if pages.is_empty() {
+        pages.push(Vec::new());
+    }
 
-    let mut idx = 0usize;
-    let mut first = true;
-    let mut quit = false;
+    let is_tty = io::stdin().is_terminal();
+    let mut page = 0usize;
+
+    draw_page(&content, pages.get(page), body_top, body_bottom, &mut rng, feed);
+
+    // Non-tty (piped/scripted) runs: render the first page and return without
+    // entering an interactive loop.
+    if !is_tty {
+        return false;
+    }
+
     loop {
-        if !first {
-            fill_bg_full(width, height);
-            draw_status_bar(width, height, unlock_time);
-            let tpad = center_pad(title, width);
-            cursor(1, 1);
-            print!(
-                "{}{}{}{}{}{}",
-                C_BG_DARK, C_DIM, " ".repeat(tpad), C_GREEN, title, C_RESET
-            );
-            draw_hline(3, width, C_CYAN);
-        }
-        first = false;
-
-        let page_end = (idx + per_page).min(content.len());
-        let mut row = body_top;
-        for i in idx..page_end {
-            reveal_row_fast(row, &content[i], width, height, unlock_time, &mut rng, feed);
-            row += 1;
-        }
-        idx = page_end;
-        if idx < content.len() && !quit {
-            let hint = "  ▸ 按任意键翻页  ";
-            let hp = center_pad(hint, width);
-            cursor(body_bottom, 1);
-            print!(
-                "{}{}{}{}{}{}{}",
-                C_BG_DARK, C_DIM, " ".repeat(hp), C_YELLOW, hint,
-                " ".repeat(width.saturating_sub(hp + display_width(hint))), C_RESET
-            );
-            flush();
-            if page_wait(feed) {
-                quit = true;
-            }
+        let hint = if pages.len() <= 1 {
+            "  ▸ 按 q 退出并烧毁  "
         } else {
-            break;
-        }
-    }
+            "  ▸ 按 空格/Enter 翻页  ·  p 返回上一页  ·  q 烧毁  "
+        };
+        let hp = center_pad(hint, width);
+        cursor(body_bottom, 1);
+        print!(
+            "{}{}{}{}{}{}{}",
+            C_BG_DARK, C_DIM, " ".repeat(hp), C_YELLOW, hint,
+            " ".repeat(width.saturating_sub(hp + display_width(hint))), C_RESET
+        );
+        flush();
 
-    // Draw the footer in the reserved bottom slots.
-    draw_hline(hline_row, width, C_CYAN);
-    let foot = "—— 守门人 ——";
-    if !quit {
-        reveal_row_fast(foot_row, foot, width, height, unlock_time, &mut rng, feed);
+        match nav_wait(feed) {
+            Nav::Next => {
+                if page + 1 < pages.len() {
+                    page += 1;
+                    draw_page(&content, pages.get(page), body_top, body_bottom, &mut rng, feed);
+                }
+                // on the last page, Next just loops back silently
+            }
+            Nav::Prev => {
+                if page > 0 {
+                    page -= 1;
+                    draw_page(&content, pages.get(page), body_top, body_bottom, &mut rng, feed);
+                }
+            }
+            Nav::Burn => {
+                let mut rng = Rng::new();
+                let target = char::from(b'A' + (rng.next_u64() % 26) as u8);
+                let ok = confirm_dialog(width, height, feed, target);
+                if ok {
+                    return true;
+                }
+                // wrong key: keep the story, repaint the current page
+                draw_page(&content, pages.get(page), body_top, body_bottom, &mut rng, feed);
+            }
+        }
+
+        // keep looping so q/p still work even on the final page
+        feed();
     }
-    draw_status_bar(width, height, unlock_time);
-    sleep(800);
-    foot_row
 }
 
-/// Wait for a keypress while in raw mode. Returns true if the user pressed q/Q
-/// (requesting burn/exit), false for any other key. Non-tty input advances
-/// immediately so piped/scripted runs never block.
-fn page_wait(feed: &dyn Fn()) -> bool {
+/// Static redraw of a single page (no reveal animation). Used both for the
+/// initial render and for "previous page" / wrong-letter cancel repaints, so the
+/// story stays readable on screen.
+fn draw_page(content: &[String], page: Option<&Vec<usize>>, top: usize, bottom: usize, rng: &mut Rng, feed: &dyn Fn()) {
+    let w = term_width();
+    let mut row = top;
+    if let Some(indices) = page {
+        for &idx in indices {
+            if row > bottom {
+                break;
+            }
+            if idx < content.len() {
+                let line = &content[idx];
+                let pad = center_pad(line, w);
+                cursor(row, 1);
+                print!("{}{}{}{}{}{}", C_BG_DARK, C_DIM, " ".repeat(pad), C_GREEN, line, C_RESET);
+                let remain = w.saturating_sub(pad + display_width(line));
+                print!("{}{}", C_BG_DARK, " ".repeat(remain));
+                flush();
+            }
+            row += 1;
+        }
+        // clear any leftover body rows from a previous longer page
+        while row <= bottom {
+            cursor(row, 1);
+            print!("{}{}{}", C_BG_DARK, " ".repeat(w), C_RESET);
+            row += 1;
+        }
+    }
+    let _ = rng;
+    feed();
+}
+
+enum Nav { Next, Prev, Burn }
+
+/// Wait for a navigation key while in raw mode.
+/// space / Enter / →  = Next page, p / ← = Previous page, q = open burn dialog.
+/// Non-tty input advances immediately (Next) so piped/scripted runs never block.
+fn nav_wait(feed: &dyn Fn()) -> Nav {
     let tty = io::stdin().is_terminal();
     if !tty {
         feed();
-        return false;
+        return Nav::Next;
     }
     let orig = raw_on();
     loop {
@@ -365,8 +416,42 @@ fn page_wait(feed: &dyn Fn()) -> bool {
                 if io::stdin().read(&mut b).unwrap_or(0) == 0 {
                     break;
                 }
-                raw_off(&orig);
-                return b[0] == b'q' || b[0] == b'Q';
+                match b[0] {
+                    b' ' | b'\n' | b'\r' => {
+                        raw_off(&orig);
+                        return Nav::Next;
+                    }
+                    b'p' | b'P' => {
+                        raw_off(&orig);
+                        return Nav::Prev;
+                    }
+                    b'q' | b'Q' => {
+                        raw_off(&orig);
+                        return Nav::Burn;
+                    }
+                    0x1b => {
+                        // possible arrow key CSI sequence: ESC [ <final>
+                        let mut seq = [0u8; 2];
+                        let n = io::stdin().read(&mut seq).unwrap_or(0);
+                        if n == 2 && seq[0] == b'[' {
+                            raw_off(&orig);
+                            return match seq[1] {
+                                b'C' => Nav::Next,
+                                b'D' => Nav::Prev,
+                                _ => Nav::Next,
+                            };
+                        } else if n == 0 {
+                            raw_off(&orig);
+                            return Nav::Next;
+                        }
+                        // not an arrow; treat as Next
+                        raw_off(&orig);
+                        return Nav::Next;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
             } else if r == 0 {
                 feed();
                 continue;
@@ -376,8 +461,9 @@ fn page_wait(feed: &dyn Fn()) -> bool {
         }
     }
     raw_off(&orig);
-    false
+    Nav::Next
 }
+
 
 pub fn burn_with_progress(width: usize, height: usize, feed: &dyn Fn()) {
     let measures = [
@@ -722,6 +808,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     out
 }
 
+#[allow(dead_code)]
 pub fn wait_for_quit(feed: &dyn Fn()) {
     let tty = io::stdin().is_terminal();
     if !tty {
@@ -822,7 +909,9 @@ fn show_dialog(width: usize, height: usize, feed: &dyn Fn(), target: char) {
     let top = height.saturating_sub(box_h) / 2 + 1;
     let hline = "═".repeat(box_w - 2);
 
-    for r in 1..=height {
+    // Overlay: only clear the rows the box occupies, leaving the story
+    // underneath untouched so a wrong-letter cancel returns cleanly.
+    for r in top..=(top + box_h - 1) {
         cursor(r, 1);
         print!("{}{}{}", C_BG_DARK, " ".repeat(width), C_RESET);
     }

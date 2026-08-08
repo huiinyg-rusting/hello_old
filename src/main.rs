@@ -11,7 +11,7 @@ mod signal;
 mod tui;
 mod watchdog;
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -138,10 +138,10 @@ fn concat3(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
     v
 }
 
-fn xor5(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32], d: &[u8; 32], e: &[u8; 32]) -> [u8; 32] {
+fn xor6(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32], d: &[u8; 32], e: &[u8; 32], f: &[u8; 32]) -> [u8; 32] {
     let mut o = [0u8; 32];
     for i in 0..32 {
-        o[i] = a[i] ^ b[i] ^ c[i] ^ d[i] ^ e[i];
+        o[i] = a[i] ^ b[i] ^ c[i] ^ d[i] ^ e[i] ^ f[i];
     }
     o
 }
@@ -708,13 +708,19 @@ fn main() {
     crypto::zeroize(dek_wrapped.as_mut_slice());
     crypto::zeroize(&mut serpent_dek_wrap_key);
 
-    // Combine shards: RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium
-    // Note: Dilithium shard is blake3 hash of public key
+    // Combine shards: RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium ^ SM3
+    // Dilithium shard is blake3 hash of public key; SM3 shard is sm3 hash of
+    // the same public key — two independent hash primitives over the VK.
     let dilithium_pk_hash_bytes: [u8; 32] = *blake3::hash(dilithium_vk_bytes).as_bytes();
     let mut s_dilithium_arr = [0u8; 32];
     s_dilithium_arr.copy_from_slice(&dilithium_pk_hash_bytes);
-    
-    let mut combined_dek = xor5(&s_rsa_arr, &s_ky_arr, &s_mce_arr, &s_frodo_arr, &s_dilithium_arr);
+
+    let sm3_vk_hash_bytes: [u8; 32] = crypto::sm3_256(dilithium_vk_bytes);
+    let mut s_sm3_arr = [0u8; 32];
+    s_sm3_arr.copy_from_slice(&sm3_vk_hash_bytes);
+
+    let mut combined_dek = xor6(&s_rsa_arr, &s_ky_arr, &s_mce_arr, &s_frodo_arr, &s_dilithium_arr, &s_sm3_arr);
+    crypto::zeroize(&mut s_sm3_arr);
     
     // Constant-time compare DEK
     if !crypto::ct_eq(&combined_dek, &dek) {
@@ -796,55 +802,27 @@ fn main() {
 
     beat();
     let unlock_time = format_unix(open_ts);
-    let rows0 = tui::show(&all, &beat, &unlock_time);
-    let width = tui::term_width();
+    let burn = tui::show(&all, &beat, &unlock_time);
+    if burn {
+        let width = tui::term_width();
+        let height = tui::term_height();
+        watchdog::stop();
+        tui::burn_with_progress(width, height, &beat);
+        key_buf.lock_none();
+        content_buf.lock_none();
 
-    let hint = " ▸ 按 q 退出并烧毁 · 按其他键继续阅读 ";
-    let hr = rows0 + 1;
-    let hpad = tui::center_pad(hint, width);
-    tui::hide_cursor();
-    print!(
-        "\x1b[{};{}H{}{}{}{}{}",
-        hr, 1,
-        C_BG_DARK, "\x1b[2m",
-        format!("{}{}", " ".repeat(hpad), hint),
-        " ".repeat(width.saturating_sub(hpad + display_width(hint))),
-        C_RESET
-    );
-    flush_stdout();
+        // Zeroize content before exit
+        crypto::zeroize(content.as_mut_slice());
 
-    loop {
-        tui::wait_for_quit(&beat);
-
-        let target = (b'A' + (tui::Rng::new().next_u64() % 26) as u8) as char;
-        if tui::confirm_dialog(width, height, &beat, target) {
-            break;
+        if std::env::var("NO_SELF_DESTRUCT").is_err() {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::fs::remove_file(exe);
+            }
         }
-        tui::hide_cursor();
-        print!(
-            "\x1b[{};{}H{}{}{}{}{}",
-            hr, 1,
-            C_BG_DARK, "\x1b[2m",
-            format!("{}{}", " ".repeat(hpad), hint),
-            " ".repeat(width.saturating_sub(hpad + display_width(hint))),
-            C_RESET
-        );
-        flush_stdout();
-    }
-
-    watchdog::stop();
-    let height = tui::term_height();
-    tui::burn_with_progress(width, height, &beat);
-    key_buf.lock_none();
-    content_buf.lock_none();
-
-    // Zeroize content before exit
-    crypto::zeroize(content.as_mut_slice());
-
-    if std::env::var("NO_SELF_DESTRUCT").is_err() {
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::fs::remove_file(exe);
-        }
+    } else {
+        // keep terminal stable after a wrong-letter cancel
+        tui::show_cursor();
+        std::process::exit(0);
     }
 }
 
@@ -852,8 +830,4 @@ fn zeroize(buf: &mut [u8]) {
     crypto::zeroize(buf);
 }
 
-fn flush_stdout() {
-    let _ = std::io::stdout().flush();
-}
-
-use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE, C_BG_DARK, display_width};
+use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE};

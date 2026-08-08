@@ -4,6 +4,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use hmac::Hmac;
 use sha3::{Digest, Sha3_256};
 use sha2::Sha256;
+use sm3::{Digest as Sm3Digest, Sm3};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
@@ -66,6 +67,16 @@ pub fn derive_wrapping_keys(master_key: &[u8; 32]) -> [[u8; 32]; 6] {
 
 pub fn sha3_256(data: &[u8]) -> [u8; 32] {
     Sha3_256::digest(data).into()
+}
+
+/// SM3-256 (Chinese national hash standard, GM/T 0009). Used as the 6th
+/// recovery shard so the dilithium public key is bound by an independent
+/// hash primitive.
+pub fn sm3_256(data: &[u8]) -> [u8; 32] {
+    let out = <Sm3 as Sm3Digest>::digest(data);
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&out);
+    a
 }
 
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {

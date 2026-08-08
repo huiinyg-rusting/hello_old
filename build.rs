@@ -7,6 +7,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
+use sm3::{Digest as Sm3Digest, Sm3};
 use std::time::UNIX_EPOCH;
 
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
@@ -77,6 +78,12 @@ fn sha3_256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(data);
     h.finalize().into()
+}
+
+fn sm3_256(data: &[u8]) -> [u8; 32] {
+    let mut h = <Sm3 as Sm3Digest>::new();
+    Sm3Digest::update(&mut h, data);
+    Sm3Digest::finalize(h).into()
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -469,8 +476,8 @@ fn main() {
         ct_mce.as_array().len()
     );
 
-    // ---- The three 32-byte shards XOR into the 256-bit Serpent DEK ----
-    // Now with 5 shards: RSA, Kyber, McEliece, FrodoKEM, Dilithium
+    // ---- The six 32-byte shards XOR into the 256-bit Serpent DEK ----
+    // Now with 6 shards: RSA, Kyber, McEliece, FrodoKEM, Dilithium(BLAKE3), SM3
 
     // ---- [Algorithm 5] FrodoKEM-1344: keypair + encapsulation ----
     use frodo_kem::Algorithm as FrodoAlgorithm;
@@ -513,15 +520,21 @@ fn main() {
     // Use blake3 hash of dilithium public key as additional entropy shard
     let dilithium_pk_hash = blake3_256(dilithium_vk.to_bytes().as_slice());
     s_dilithium.copy_from_slice(&dilithium_pk_hash);
+
+    // Use SM3 hash of the *same* dilithium public key as a 6th shard, so the
+    // VK is bound by two independent hash primitives (BLAKE3 + SM3). The byte
+    // slice here is identical to what main.rs uses, keeping DEK recovery round-trip valid.
+    let s_sm3 = sm3_256(dilithium_vk.to_bytes().as_slice());
     println!(
         "cargo:warning=CRYSTALS-Dilithium-5 (ML-DSA-87): vk={} sk wrapped",
         dilithium_vk.to_bytes().as_slice().len()
     );
 
-    // ---- Combine all 5 shards into the 256-bit Serpent DEK ----
-    // RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium
+    // ---- Combine all 6 shards into the 256-bit Serpent DEK ----
+    // RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium(BLAKE3) ^ SM3
     let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
     dek = xor32(&dek, &s_frodo, &s_dilithium);
+    dek = xor32(&dek, &s_sm3, &[0u8; 32]);
 
     // ---- [Algorithm 7] Serpent-256-SIV: authenticated encryption of the payload ----
     // The plaintext is the sealed payload: [meta_len][meta_json][content],

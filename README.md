@@ -1,9 +1,6 @@
-# hello_old — 时间之门的守护者
+# hello_old
 
 AI made
-
-如果秘密是一座城市，`hello_old` 就是环绕它的**时间长城**。
-
 它不是一把普通的钥匙，而是一座**七道城门嵌套、各自挂着不同锁**的城堡。盗贼必须依次撬开每一道门，任何一道门察觉到可疑的动静，整座城堡就会**当场自焚**，连同门里的秘密一起化为灰烬，连一页纸都不留下。
 
 它固执到什么程度？它**不信任任何一块主板电池**——时钟会坏、电池会耗干、未来机器的年月日你无从预料。所以它把裁决权交给天上散布的许多座"星钟"（NTP 服务器），只有它们彼此对齐、且与你手表的读数相合，它才肯转动第一道铰链。你可以把它装进口袋、带到几十年后的任何一台 x86_64 机器上，它不挑主人，只认时间与口令。
@@ -34,20 +31,24 @@ AI made
  │  从加密的 km.bin 中重建 k1∥k2
  ▼
 6 把 HKDF-SHA256 包裹密钥
- ├─► RSA-4096-OAEP 私钥解密 ────────────► shard1
- ├─► Kyber-1024 (ML-KEM) 解封装 ────────► shard2
- ├─► Classic McEliece-6960119f 解封装 ──► shard3
- ├─► FrodoKEM-1344 解封装 ──────────────► shard4
- ├─► Dilithium-5 (ML-DSA-87) 签名验证 ──► shard5 = blake3(公钥)
- └─► Serpent-256-SIV 解密 DEK 包裹 ─────► DEK
- │
- ▼
-五片 shard XOR 重组 32B 数据密钥 (DEK)
- ▼
-Ed448 + Dilithium-5 双重签名验证 (时间戳∥DEK∥载荷哈希)
- ▼
-Serpent-256-SIV 解密载荷（153 字节）
-```
+  ├─► RSA-4096-OAEP 私钥解密 ────────────► shard1
+  ├─► Kyber-1024 (ML-KEM) 解封装 ────────► shard2
+  ├─► Classic McEliece-6960119f 解封装 ──► shard3
+  ├─► FrodoKEM-1344 解封装 ──────────────► shard4
+  ├─► Dilithium-5 (ML-DSA-87) 验签 ─────► shard5 = blake3(公钥)
+  ├─► SM3-256 国密哈希 ─────────────────► shard6 = sm3(公钥) ①
+  └─► Serpent-256-SIV 解密 DEK 包裹 ─────► DEK
+  │
+  ▼
+  六片 shard XOR 重组 32B 数据密钥 (DEK) ②
+  ▼
+  Ed448 + Dilithium-5 双重签名验证 (时间戳 ∥ DEK ∥ SHA3-256(密封载荷))
+  ▼
+  Serpent-256-SIV 解密载荷
+  ```
+
+  - 共 6 片 shard XOR 得 256-bit DEK：`RSA ⊕ Kyber ⊕ McEliece ⊕ FrodoKEM ⊕ SHA3-256(Dilithium VK) ⊕ SM3-256(Dilithium VK)`。
+  - 最后两片分别用 **BLAKE3** 与 **SM3** (国密) 哈希同一把 Dilithium 公钥——两种独立哈希，缺一即使 DEK 重组失败。
 
 **破解者必须同时面对：**
 
