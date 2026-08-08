@@ -287,7 +287,7 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     draw_hline(row, width, C_CYAN);
     row += 1;
 
-    let foot = "—— HAL 9000 ——";
+    let foot = "—— 守门人 ——";
     reveal_row_fast(row, foot, width, height, unlock_time, &mut rng, feed);
     row += 1;
     draw_status_bar(width, height, unlock_time);
