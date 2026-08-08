@@ -1,5 +1,65 @@
-main: key_sha=[143, 193, 170, 237, 225, 4, 126, 38, 54, 16, 200, 122, 196, 5, 156, 202, 58, 117, 4, 62, 60, 84, 55, 2, 18, 228, 12, 50, 195, 34, 79, 15]
-watchdog thread started, exe_sha=[180, 226, 6, 70, 209, 124, 206, 144, 21, 233, 107, 76, 205, 108, 212, 160, 87, 202, 203, 2, 115, 156, 179, 221, 30, 162, 171, 71, 149, 234, 49, 164]
+main: key_sha=[49, 122, 235, 45, 54, 70, 12, 138, 2, 28, 186, 164, 34, 143, 154, 132, 248, 166, 246, 240, 224, 225, 147, 50, 241, 212, 106, 228, 68, 166, 32, 10]
+watchdog thread started, exe_sha=[179, 120, 29, 226, 103, 69, 243, 35, 37, 123, 231, 56, 81, 166, 64, 181, 60, 74, 144, 137, 66, 24, 179, 240, 45, 142, 169, 102, 93, 4, 67, 199]
+watchdog check: stale=false, traced=false
+main: all key=[226, 228, 22, 222, 205, 34, 96, 190, 194, 65, 167, 176, 128, 115, 170, 156, 63, 125, 195, 142, 21, 53, 124, 201, 156, 241, 223, 99, 47, 249, 253, 134, 125, 167, 208, 165, 107, 168, 193, 10, 141, 193, 224, 29, 89, 213, 47, 56, 176, 112, 69, 11, 119, 249, 116, 169, 242, 215, 77, 139, 1, 189, 69, 220]
+main: k1=[226, 228, 22, 222, 205, 34, 96, 190, 194, 65, 167, 176, 128, 115, 170, 156, 63, 125, 195, 142, 21, 53, 124, 201, 156, 241, 223, 99, 47, 249, 253, 134], k2=[125, 167, 208, 165, 107, 168, 193, 10, 141, 193, 224, 29, 89, 213, 47, 56, 176, 112, 69, 11, 119, 249, 116, 169, 242, 215, 77, 139, 1, 189, 69, 220]
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+main: key_sha=[142, 108, 129, 42, 250, 41, 127, 88, 245, 222, 80, 155, 85, 179, 255, 70, 28, 69, 232, 191, 177, 139, 136, 140, 105, 3, 79, 14, 225, 82, 175, 225]
+watchdog thread started, exe_sha=[90, 19, 236, 116, 227, 230, 213, 55, 212, 136, 220, 223, 124, 138, 143, 65, 167, 192, 76, 74, 56, 59, 22, 174, 185, 51, 120, 121, 224, 134, 30, 79]
+watchdog check: stale=false, traced=false
+main: all key=[1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1]
+main: k1=[1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0], k2=[1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1]
+main: decrypt TS_BLOB failed
+self_destruct invoked at 1786155988 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)
+main: key_sha=[142, 108, 129, 42, 250, 41, 127, 88, 245, 222, 80, 155, 85, 179, 255, 70, 28, 69, 232, 191, 177, 139, 136, 140, 105, 3, 79, 14, 225, 82, 175, 225]
+watchdog thread started, exe_sha=[90, 19, 236, 116, 227, 230, 213, 55, 212, 136, 220, 223, 124, 138, 143, 65, 167, 192, 76, 74, 56, 59, 22, 174, 185, 51, 120, 121, 224, 134, 30, 79]
+watchdog check: stale=false, traced=false
+main: all key=[1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1]
+main: k1=[1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0], k2=[1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1]
+main: decrypt TS_BLOB failed
+self_destruct invoked at 1786156012 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)
+main: key_sha=[246, 15, 179, 34, 133, 34, 201, 250, 48, 203, 68, 202, 164, 246, 222, 226, 87, 246, 5, 225, 33, 111, 159, 46, 194, 151, 207, 242, 208, 157, 200, 0]
+watchdog thread started, exe_sha=[220, 61, 82, 199, 11, 204, 108, 5, 215, 235, 227, 223, 251, 86, 27, 28, 35, 58, 199, 21, 97, 106, 251, 70, 194, 179, 80, 155, 132, 97, 215, 64]
+watchdog check: stale=false, traced=false
+main: all key=[0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+main: k1=[0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1], k2=[0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+main: decrypt TS_BLOB failed
+self_destruct invoked at 1786156206 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)
+main: key_sha=[153, 48, 202, 100, 240, 225, 176, 4, 79, 177, 127, 216, 53, 83, 56, 14, 240, 164, 52, 22, 36, 43, 168, 24, 133, 45, 86, 164, 24, 61, 186, 67]
+watchdog thread started, exe_sha=[37, 129, 222, 145, 197, 73, 64, 250, 211, 76, 255, 29, 46, 92, 81, 35, 138, 49, 186, 201, 213, 51, 102, 243, 192, 9, 160, 174, 105, 138, 94, 171]
+watchdog check: stale=false, traced=false
+main: all key=[1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+main: k1=[1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0], k2=[0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+main: decrypt TS_BLOB failed
+self_destruct invoked at 1786156395 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)
+main: key_sha=[153, 48, 202, 100, 240, 225, 176, 4, 79, 177, 127, 216, 53, 83, 56, 14, 240, 164, 52, 22, 36, 43, 168, 24, 133, 45, 86, 164, 24, 61, 186, 67]
+watchdog thread started, exe_sha=[37, 129, 222, 145, 197, 73, 64, 250, 211, 76, 255, 29, 46, 92, 81, 35, 138, 49, 186, 201, 213, 51, 102, 243, 192, 9, 160, 174, 105, 138, 94, 171]
+watchdog check: stale=false, traced=false
+main: all key=[1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+main: k1=[1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0], k2=[0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+main: decrypt TS_BLOB failed
+self_destruct invoked at 1786156412 from thread ThreadId(1)
+NO_SELF_DESTRUCT branch taken, calling exit(1)
+main: key_sha=[207, 164, 228, 126, 70, 35, 113, 189, 157, 229, 247, 206, 32, 95, 159, 119, 140, 121, 167, 109, 115, 83, 120, 131, 109, 50, 147, 77, 162, 141, 155, 59]
+watchdog thread started, exe_sha=[69, 20, 184, 228, 232, 224, 74, 84, 77, 125, 192, 63, 175, 203, 207, 62, 254, 134, 187, 94, 92, 208, 62, 148, 22, 38, 248, 66, 116, 121, 144, 252]
+watchdog check: stale=false, traced=false
+main: all key=[213, 39, 141, 19, 169, 224, 113, 169, 38, 98, 147, 14, 181, 192, 182, 92, 75, 61, 63, 154, 223, 106, 81, 75, 229, 38, 82, 204, 18, 179, 9, 94, 242, 87, 19, 77, 247, 216, 145, 11, 189, 155, 190, 144, 114, 88, 215, 108, 160, 213, 47, 54, 233, 149, 237, 52, 142, 92, 237, 214, 248, 184, 117, 17]
+main: k1=[213, 39, 141, 19, 169, 224, 113, 169, 38, 98, 147, 14, 181, 192, 182, 92, 75, 61, 63, 154, 223, 106, 81, 75, 229, 38, 82, 204, 18, 179, 9, 94], k2=[242, 87, 19, 77, 247, 216, 145, 11, 189, 155, 190, 144, 114, 88, 215, 108, 160, 213, 47, 54, 233, 149, 237, 52, 142, 92, 237, 214, 248, 184, 117, 17]
+watchdog check: stale=false, traced=false
+main: key_sha=[207, 164, 228, 126, 70, 35, 113, 189, 157, 229, 247, 206, 32, 95, 159, 119, 140, 121, 167, 109, 115, 83, 120, 131, 109, 50, 147, 77, 162, 141, 155, 59]
+watchdog thread started, exe_sha=[69, 20, 184, 228, 232, 224, 74, 84, 77, 125, 192, 63, 175, 203, 207, 62, 254, 134, 187, 94, 92, 208, 62, 148, 22, 38, 248, 66, 116, 121, 144, 252]
+watchdog check: stale=false, traced=false
+main: all key=[213, 39, 141, 19, 169, 224, 113, 169, 38, 98, 147, 14, 181, 192, 182, 92, 75, 61, 63, 154, 223, 106, 81, 75, 229, 38, 82, 204, 18, 179, 9, 94, 242, 87, 19, 77, 247, 216, 145, 11, 189, 155, 190, 144, 114, 88, 215, 108, 160, 213, 47, 54, 233, 149, 237, 52, 142, 92, 237, 214, 248, 184, 117, 17]
+main: k1=[213, 39, 141, 19, 169, 224, 113, 169, 38, 98, 147, 14, 181, 192, 182, 92, 75, 61, 63, 154, 223, 106, 81, 75, 229, 38, 82, 204, 18, 179, 9, 94], k2=[242, 87, 19, 77, 247, 216, 145, 11, 189, 155, 190, 144, 114, 88, 215, 108, 160, 213, 47, 54, 233, 149, 237, 52, 142, 92, 237, 214, 248, 184, 117, 17]
+watchdog check: stale=false, traced=false
+watchdog check: stale=false, traced=false
+main: key_sha=[17, 252, 249, 55, 190, 169, 229, 253, 38, 22, 5, 77, 118, 170, 213, 135, 161, 83, 80, 46, 248, 89, 192, 160, 18, 55, 35, 49, 185, 250, 92, 182]
+watchdog thread started, exe_sha=[102, 222, 184, 211, 151, 98, 62, 9, 209, 228, 239, 233, 14, 184, 234, 153, 78, 175, 151, 189, 101, 231, 191, 42, 49, 231, 148, 240, 130, 149, 178, 214]
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
@@ -8,53 +68,8 @@ watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
-main: all key=[157, 1, 27, 147, 249, 111, 62, 76, 206, 179, 17, 57, 153, 61, 78, 120, 69, 37, 86, 134, 206, 3, 244, 92, 146, 140, 4, 13, 37, 64, 104, 50, 38, 2, 249, 132, 233, 244, 137, 83, 189, 152, 186, 22, 84, 180, 97, 209, 8, 192, 177, 94, 181, 101, 145, 154, 48, 183, 176, 238, 49, 13, 72, 107]
-main: k1=[157, 1, 27, 147, 249, 111, 62, 76, 206, 179, 17, 57, 153, 61, 78, 120, 69, 37, 86, 134, 206, 3, 244, 92, 146, 140, 4, 13, 37, 64, 104, 50], k2=[38, 2, 249, 132, 233, 244, 137, 83, 189, 152, 186, 22, 84, 180, 97, 209, 8, 192, 177, 94, 181, 101, 145, 154, 48, 183, 176, 238, 49, 13, 72, 107]
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-main: key_sha=[143, 193, 170, 237, 225, 4, 126, 38, 54, 16, 200, 122, 196, 5, 156, 202, 58, 117, 4, 62, 60, 84, 55, 2, 18, 228, 12, 50, 195, 34, 79, 15]
-watchdog thread started, exe_sha=[180, 226, 6, 70, 209, 124, 206, 144, 21, 233, 107, 76, 205, 108, 212, 160, 87, 202, 203, 2, 115, 156, 179, 221, 30, 162, 171, 71, 149, 234, 49, 164]
-watchdog check: stale=false, traced=false
-main: all key=[157, 1, 27, 147, 249, 111, 62, 76, 206, 179, 17, 57, 153, 61, 78, 120, 69, 37, 86, 134, 206, 3, 244, 92, 146, 140, 4, 13, 37, 64, 104, 50, 38, 2, 249, 132, 233, 244, 137, 83, 189, 152, 186, 22, 84, 180, 97, 209, 8, 192, 177, 94, 181, 101, 145, 154, 48, 183, 176, 238, 49, 13, 72, 107]
-main: k1=[157, 1, 27, 147, 249, 111, 62, 76, 206, 179, 17, 57, 153, 61, 78, 120, 69, 37, 86, 134, 206, 3, 244, 92, 146, 140, 4, 13, 37, 64, 104, 50], k2=[38, 2, 249, 132, 233, 244, 137, 83, 189, 152, 186, 22, 84, 180, 97, 209, 8, 192, 177, 94, 181, 101, 145, 154, 48, 183, 176, 238, 49, 13, 72, 107]
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
-watchdog check: stale=false, traced=false
+main: all key=[240, 51, 25, 49, 16, 9, 9, 129, 33, 33, 168, 142, 102, 150, 244, 242, 160, 136, 5, 78, 104, 116, 40, 89, 122, 131, 142, 143, 12, 104, 162, 240, 72, 119, 64, 171, 173, 73, 238, 74, 230, 221, 222, 143, 64, 250, 54, 57, 6, 151, 252, 45, 168, 70, 120, 60, 229, 36, 229, 222, 243, 243, 233, 13]
+main: k1=[240, 51, 25, 49, 16, 9, 9, 129, 33, 33, 168, 142, 102, 150, 244, 242, 160, 136, 5, 78, 104, 116, 40, 89, 122, 131, 142, 143, 12, 104, 162, 240], k2=[72, 119, 64, 171, 173, 73, 238, 74, 230, 221, 222, 143, 64, 250, 54, 57, 6, 151, 252, 45, 168, 70, 120, 60, 229, 36, 229, 222, 243, 243, 233, 13]
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false
 watchdog check: stale=false, traced=false

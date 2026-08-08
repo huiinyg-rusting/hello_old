@@ -27,6 +27,11 @@ fn ct_select(cond: bool, a: u64, b: u64) -> u64 {
     (a & mask) | (b & !mask)
 }
 
+// Constant-time select for usize values (stack pointer)
+fn ct_select_usize(cond: bool, a: usize, b: usize) -> usize {
+    ct_select(cond, a as u64, b as u64) as usize
+}
+
 // Side-channel resistant: constant-time index access
 fn ct_load(material: &[u8], idx: usize) -> u64 {
     let mut result = 0u64;
@@ -39,128 +44,252 @@ fn ct_load(material: &[u8], idx: usize) -> u64 {
 }
 
 pub fn run(prog: &[u8], material: &[u8], out: &mut [u8]) -> bool {
-    let mut stack: Vec<u64> = Vec::with_capacity(16);
-    let mut ip = 0usize;
-    // Pre-fill stack to fixed size to avoid timing leaks from allocations
-    stack.resize(16, 0);
+    let mut stack: [u64; 16] = [0; 16];
     let mut sp = 0usize;
+    let mut ip = 0usize;
+    let mut ok = true;
+
     while ip < prog.len() {
         let op = prog[ip];
         ip += 1;
-        match op {
-            OP_PUSH1 => {
-                if ip >= prog.len() { return false; }
-                stack.push(prog[ip] as u64);
-                ip += 1;
-            }
-            OP_PUSH8 => {
-                if ip + 8 > prog.len() { return false; }
-                let v = u64::from_le_bytes(prog[ip..ip + 8].try_into().unwrap());
-                stack.push(v);
-                ip += 8;
-            }
-            OP_PUSHKEY => {
-                if ip >= prog.len() { return false; }
-                let idx = prog[ip] as usize;
-                ip += 1;
-                if idx >= material.len() {
-                    return false;
-                }
-                stack.push(material[idx] as u64);
-            }
-            OP_DUP => {
-                let a = *stack.last().unwrap_or(&0);
-                stack.push(a);
-            }
-            OP_SWAP => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(a);
-                stack.push(b);
-            }
-            OP_DROP => {
-                if stack.is_empty() { return false; }
-                stack.pop();
-            }
-            OP_XOR => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(a ^ b);
-            }
-            OP_ADD => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(a.wrapping_add(b));
-            }
-            OP_SUB => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(b.wrapping_sub(a));
-            }
-            OP_AND => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(a & b);
-            }
-            OP_OR => {
-                if stack.len() < 2 { return false; }
-                let a = stack.pop().unwrap();
-                let b = stack.pop().unwrap();
-                stack.push(a | b);
-            }
-            OP_NOT => {
-                if stack.is_empty() { return false; }
-                let a = stack.pop().unwrap();
-                stack.push(!a);
-            }
-            OP_ROTL => {
-                if ip >= prog.len() { return false; }
-                let n = (prog[ip] as u32) & 63;
-                ip += 1;
-                if stack.is_empty() { return false; }
-                let a = stack.pop().unwrap();
-                stack.push(a.rotate_left(n));
-            }
-            OP_ROTR => {
-                if ip >= prog.len() { return false; }
-                let n = (prog[ip] as u32) & 63;
-                ip += 1;
-                if stack.is_empty() { return false; }
-                let a = stack.pop().unwrap();
-                stack.push(a.rotate_right(n));
-            }
-            OP_WRMEM => {
-                if ip >= prog.len() { return false; }
-                let idx = prog[ip] as usize;
-                ip += 1;
-                if idx >= out.len() { return false; }
-                if stack.is_empty() { return false; }
-                let v = stack.pop().unwrap();
-                out[idx] = v as u8;
-            }
-            OP_OPAQUE_LABEL => {
-                if ip + 2 > prog.len() { return false; }
-                ip += 2;
-            }
-            OP_HALT => break,
-            op if op >= OP_OPAQUE_PRED_BASE && op <= OP_OPAQUE_PRED_END => {
-                if ip >= prog.len() { return false; }
-                ip += 1;
-            }
-            op if op >= OP_CF_OBFUSCATE_BASE && op <= OP_CF_OBFUSCATE_END => {
-                if ip + 2 > prog.len() { return false; }
-                ip += 2;
-            }
-            _ => return false,
+
+        let is_push1 = (op == OP_PUSH1) as u64;
+        let is_push8 = (op == OP_PUSH8) as u64;
+        let is_pushkey = (op == OP_PUSHKEY) as u64;
+        let is_dup = (op == OP_DUP) as u64;
+        let is_swap = (op == OP_SWAP) as u64;
+        let is_drop = (op == OP_DROP) as u64;
+        let is_xor = (op == OP_XOR) as u64;
+        let is_add = (op == OP_ADD) as u64;
+        let is_sub = (op == OP_SUB) as u64;
+        let is_and = (op == OP_AND) as u64;
+        let is_or = (op == OP_OR) as u64;
+        let is_not = (op == OP_NOT) as u64;
+        let is_rotl = (op == OP_ROTL) as u64;
+        let is_rotr = (op == OP_ROTR) as u64;
+        let is_wrmem = (op == OP_WRMEM) as u64;
+        let is_halt = (op == OP_HALT) as u64;
+
+        // OP_PUSH1
+        if is_push1 == 1 {
+            let valid = (ip < prog.len()) as u64;
+            let val = if ip < prog.len() { prog[ip] as u64 } else { 0 };
+            ip += 1;
+            stack[sp] = ct_select(valid != 0, val, stack[sp]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_add(1), sp);
+            ok &= valid != 0;
         }
-        if stack.len() > 256 {
-            return false;
+
+        // OP_PUSH8
+        if is_push8 == 1 {
+            let valid = (ip + 8 <= prog.len()) as u64;
+            let mut val = 0u64;
+            if valid != 0 {
+                val = u64::from_le_bytes(prog[ip..ip + 8].try_into().unwrap());
+            }
+            ip += 8;
+            stack[sp] = ct_select(valid != 0, val, stack[sp]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_add(1), sp);
+            ok &= valid != 0;
         }
+
+        // OP_PUSHKEY
+        if is_pushkey == 1 {
+            let idx = if ip < prog.len() { prog[ip] as usize } else { 0 };
+            let valid = (ip < prog.len() && idx < material.len()) as u64;
+            ip += 1;
+            let val = ct_load(material, idx);
+            stack[sp] = ct_select(valid != 0, val, stack[sp]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_add(1), sp);
+            ok &= valid != 0;
+        }
+
+        // OP_DUP
+        if is_dup == 1 {
+            let valid = (sp > 0) as u64;
+            let val = stack[sp.wrapping_sub(1)];
+            stack[sp] = ct_select(valid != 0, val, stack[sp]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_add(1), sp);
+            ok &= valid != 0;
+        }
+
+        // OP_SWAP
+        if is_swap == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let ca = ct_select(valid != 0, b, a);
+            let cb = ct_select(valid != 0, a, b);
+            stack[sp.wrapping_sub(1)] = ca;
+            stack[sp.wrapping_sub(2)] = cb;
+            ok &= valid != 0;
+        }
+
+        // OP_DROP
+        if is_drop == 1 {
+            let valid = (sp > 0) as u64;
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            ok &= valid != 0;
+        }
+
+        // OP_XOR
+        if is_xor == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let res = ct_select(valid != 0, a ^ b, stack[sp.wrapping_sub(1)]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_ADD
+        if is_add == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let res = ct_select(valid != 0, a.wrapping_add(b), stack[sp.wrapping_sub(1)]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_SUB
+        if is_sub == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let res = ct_select(valid != 0, b.wrapping_sub(a), stack[sp.wrapping_sub(1)]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_AND
+        if is_and == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let res = ct_select(valid != 0, a & b, stack[sp.wrapping_sub(1)]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_OR
+        if is_or == 1 {
+            let valid = (sp >= 2) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let b = stack[sp.wrapping_sub(2)];
+            let res = ct_select(valid != 0, a | b, stack[sp.wrapping_sub(1)]);
+            sp = ct_select_usize(valid != 0, sp.wrapping_sub(1), sp);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_NOT
+        if is_not == 1 {
+            let valid = (sp > 0) as u64;
+            let a = stack[sp.wrapping_sub(1)];
+            let res = ct_select(valid != 0, !a, a);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_ROTL
+        if is_rotl == 1 {
+            let valid = (ip < prog.len() && sp > 0) as u64;
+            let n = if ip < prog.len() { (prog[ip] as u32) & 63 } else { 0 };
+            ip += 1;
+            let a = stack[sp.wrapping_sub(1)];
+            let res = ct_select(valid != 0, a.rotate_left(n), a);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_ROTR
+        if is_rotr == 1 {
+            let valid = (ip < prog.len() && sp > 0) as u64;
+            let n = if ip < prog.len() { (prog[ip] as u32) & 63 } else { 0 };
+            ip += 1;
+            let a = stack[sp.wrapping_sub(1)];
+            let res = ct_select(valid != 0, a.rotate_right(n), a);
+            stack[sp.wrapping_sub(1)] = res;
+            ok &= valid != 0;
+        }
+
+        // OP_WRMEM - constant-time output write
+        if is_wrmem == 1 {
+            let valid_idx = (ip < prog.len()) as u64;
+            let idx = if ip < prog.len() { prog[ip] as usize } else { 0 };
+            ip += 1;
+            let valid_sp = (sp > 0) as u64;
+            let val = if sp > 0 { stack[sp.wrapping_sub(1)] } else { 0 };
+            let valid_out = (idx < out.len()) as u64;
+            let valid = valid_idx & valid_sp & valid_out;
+            for (i, byte) in out.iter_mut().enumerate() {
+                let eq = ((i ^ idx) == 0) as u64;
+                let mask = eq.wrapping_neg() & ((valid != 0) as u64).wrapping_neg();
+                *byte ^= ((val as u8) ^ *byte) & (mask as u8);
+            }
+            sp = ct_select_usize(valid_sp != 0, sp.wrapping_sub(1), sp);
+            ok &= valid != 0;
+        }
+
+        // OP_OPAQUE_LABEL
+        if op == OP_OPAQUE_LABEL {
+            let valid = (ip + 2 <= prog.len()) as u64;
+            ip += 2;
+            ok &= valid != 0;
+        }
+
+        // OP_HALT
+        if is_halt == 1 {
+            break;
+        }
+
+        // Opaque predicates (0xE0-0xE3) - constant-time skip
+        let is_ppred = (op >= OP_OPAQUE_PRED_BASE && op <= OP_OPAQUE_PRED_END) as u64;
+        if is_ppred == 1 {
+            let valid = (ip < prog.len()) as u64;
+            ip += 1;
+            ok &= valid != 0;
+        }
+
+        // CF obfuscation (0xA0-0xA5) - constant-time skip
+        let is_cf = (op >= OP_CF_OBFUSCATE_BASE && op <= OP_CF_OBFUSCATE_END) as u64;
+        if is_cf == 1 {
+            let valid = (ip + 2 <= prog.len()) as u64;
+            ip += 2;
+            ok &= valid != 0;
+        }
+
+        // Unknown opcode
+        let known = op == OP_PUSH1
+            || op == OP_PUSH8
+            || op == OP_PUSHKEY
+            || op == OP_DUP
+            || op == OP_SWAP
+            || op == OP_DROP
+            || op == OP_XOR
+            || op == OP_ADD
+            || op == OP_SUB
+            || op == OP_AND
+            || op == OP_OR
+            || op == OP_NOT
+            || op == OP_ROTL
+            || op == OP_ROTR
+            || op == OP_WRMEM
+            || op == OP_OPAQUE_LABEL
+            || op == OP_HALT
+            || (op >= OP_OPAQUE_PRED_BASE && op <= OP_OPAQUE_PRED_END)
+            || (op >= OP_CF_OBFUSCATE_BASE && op <= OP_CF_OBFUSCATE_END);
+        ok &= known;
+
+        // Stack overflow check
+        let overflow = (sp >= 16) as u64;
+        ok &= overflow == 0;
     }
-    true
+
+    ok
 }

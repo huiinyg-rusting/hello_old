@@ -12,20 +12,17 @@ mod tui;
 mod watchdog;
 
 use std::io::{IsTerminal, Write};
-use zeroize::Zeroize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::fs::OpenOptions;
-use std::io::Write as IoWrite;
 
-use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use rsa::{Oaep, RsaPrivateKey};
 use rsa::pkcs8::DecodePrivateKey;
-use ml_kem::{DecapsulationKey, MlKem1024, KeyExport};
+use ml_kem::{DecapsulationKey, MlKem1024};
 use classic_mceliece_rust as mc;
-use frodo_kem::{Algorithm as FrodoAlgorithm, DecryptionKey, Ciphertext, SharedSecret};
-use crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey, RandomMode, Signature};
-use ed448_goldilocks::{Signature, VerifyingKey};
-use ed448_goldilocks::elliptic_curve::PublicKey as EdPublicKey;
+use frodo_kem::{Algorithm as FrodoAlgorithm, DecryptionKey, Ciphertext};
+use crystals_dilithium::ml_dsa_87::PublicKey;
+use ed448_goldilocks::VerifyingKey;
 use blake3;
 use sha2::{Sha256, Digest};
 
@@ -339,7 +336,7 @@ fn main() {
     tui::dynamic_center_message(&date_label, C_YELLOW, &noop);
 
     let prompt = "Enter decryption password:";
-    let mut prog;
+    let mut prog: Vec<u8>;
     loop {
         tui::dynamic_center_prompt(prompt, &noop);
         let mut password = match pass::read_password() {
@@ -577,17 +574,19 @@ fn main() {
     
     // Derive 6 independent wrapping keys from master key (k1||k2)
     let mut wrapping_keys = crypto::derive_wrapping_keys(&k1);
-    let rsa_wrap_key = wrapping_keys[0];
-    let kyber_wrap_key = wrapping_keys[1];
-    let mceliece_wrap_key = wrapping_keys[2];
-    let frodokem_wrap_key = wrapping_keys[3];
-    let dilithium_wrap_key = wrapping_keys[4];
-    let serpent_dek_wrap_key = wrapping_keys[5];
-    zeroize(&mut wrapping_keys);
+    let mut rsa_wrap_key = wrapping_keys[0];
+    let mut kyber_wrap_key = wrapping_keys[1];
+    let mut mceliece_wrap_key = wrapping_keys[2];
+    let mut frodokem_wrap_key = wrapping_keys[3];
+    let mut dilithium_wrap_key = wrapping_keys[4];
+    let mut serpent_dek_wrap_key = wrapping_keys[5];
+    for k in wrapping_keys.iter_mut() {
+        crypto::zeroize(k);
+    }
 
     // Layer 2: RSA-4096-OAEP
     fx.draw(0.1, &beat);
-    let rsa_sk_der = match crypto::decrypt(&rsa_wrap_key, RSA_SK_WRAP) {
+    let mut rsa_sk_der = match crypto::decrypt(&rsa_wrap_key, RSA_SK_WRAP) {
         Some(b) => b,
         None => { log_self_destruct("main: unwrap RSA SK failed"); watchdog::self_destruct(); }
     };
@@ -601,12 +600,20 @@ fn main() {
 
     // Layer 3: Kyber-1024
     fx.draw(0.2, &beat);
-    let ky_sk_bytes = match crypto::decrypt(&kyber_wrap_key, KY_SK_WRAP) {
+    let mut ky_sk_bytes = match crypto::decrypt(&kyber_wrap_key, KY_SK_WRAP) {
         Some(b) => b,
         None => { log_self_destruct("main: unwrap Kyber SK failed"); watchdog::self_destruct(); }
     };
-    let dk_ky = DecapsulationKey::<MlKem1024>::from_bytes(ky_sk_bytes.as_slice().try_into().expect("kyber sk len")).expect("Kyber SK parse");
-    let sh_ky = dk_ky.decapsulate(CT_KY.as_slice().try_into().expect("kyber ct len")).expect("Kyber decap");
+    let dk_ky = {
+        let seed_bytes: [u8; 64] = ky_sk_bytes[..64].try_into().expect("kyber seed len");
+        let seed = ml_kem::Seed::from(seed_bytes);
+        DecapsulationKey::<MlKem1024>::from_seed(seed)
+    };
+    let sh_ky = {
+        use ml_kem::Decapsulate;
+        let ct = ml_kem::Ciphertext::<MlKem1024>::try_from(CT_KY).expect("kyber ct len");
+        dk_ky.decapsulate(&ct)
+    };
     let mut s_ky_arr = [0u8; 32];
     s_ky_arr.copy_from_slice(sh_ky.as_slice());
     crypto::zeroize(ky_sk_bytes.as_mut_slice());
@@ -614,29 +621,35 @@ fn main() {
 
     // Layer 4: Classic McEliece-6960119f
     fx.draw(0.3, &beat);
-    let mce_sk_bytes = match crypto::decrypt(&mceliece_wrap_key, MCE_SK_WRAP) {
+    let mut mce_sk_bytes = match crypto::decrypt(&mceliece_wrap_key, MCE_SK_WRAP) {
         Some(b) => b,
         None => { log_self_destruct("main: unwrap McEliece SK failed"); watchdog::self_destruct(); }
     };
-    let sk_mce = mc::SecretKey::from_array(mce_sk_bytes.as_slice().try_into().expect("mceliece sk len")).expect("McEliece SK parse");
-    let sh_mce = mc::decapsulate_boxed(&sk_mce, CT_MCE.as_slice().try_into().expect("mceliece ct len")).expect("McEliece decap");
+    let mut mce_sk_arr: [u8; mc::CRYPTO_SECRETKEYBYTES] = mce_sk_bytes.as_slice().try_into().expect("mceliece sk len");
+    let sk_mce = mc::SecretKey::from(&mut mce_sk_arr);
+    let ct_mce_arr: [u8; mc::CRYPTO_CIPHERTEXTBYTES] = {
+        let mut arr = [0u8; mc::CRYPTO_CIPHERTEXTBYTES];
+        arr.copy_from_slice(&CT_MCE[..mc::CRYPTO_CIPHERTEXTBYTES]);
+        arr
+    };
+    let sh_mce = mc::decapsulate_boxed(&mc::Ciphertext::from(ct_mce_arr), &sk_mce);
     let mut s_mce_arr = [0u8; 32];
-    s_mce_arr.copy_from_slice(sh_mce.as_array());
+    s_mce_arr.copy_from_slice(&sh_mce.as_array()[..32]);
     crypto::zeroize(mce_sk_bytes.as_mut_slice());
     crypto::zeroize(&mut mceliece_wrap_key);
 
     // Layer 5: FrodoKEM-1344
     fx.draw(0.4, &beat);
-    let frodo_sk_bytes = match crypto::decrypt(&frodokem_wrap_key, FRODO_SK_WRAP) {
+    let mut frodo_sk_bytes = match crypto::decrypt(&frodokem_wrap_key, FRODO_SK_WRAP) {
         Some(b) => b,
         None => { log_self_destruct("main: unwrap FrodoKEM SK failed"); watchdog::self_destruct(); }
     };
-    let frodo_sk = DecryptionKey::from_bytes(frodo_sk_bytes.as_slice()).expect("FrodoKEM SK parse");
     let frodo_alg = FrodoAlgorithm::FrodoKem1344Aes;
+    let frodo_sk = DecryptionKey::from_bytes(frodo_alg, &frodo_sk_bytes).expect("FrodoKEM SK parse");
     let frodo_ct = Ciphertext::from_bytes(frodo_alg, &CT_FRODO).expect("FrodoKEM ciphertext parse");
-    let (sh_frodo, _dec_msg) = frodo_alg.decapsulate(&frodo_sk, &frodo_ct).expect("FrodoKEM decap");
+    let (_sh_frodo, frodo_msg) = frodo_alg.decapsulate(&frodo_sk, &frodo_ct).expect("FrodoKEM decap");
     let mut s_frodo_arr = [0u8; 32];
-    s_frodo_arr.copy_from_slice(sh_frodo.as_ref());
+    s_frodo_arr.copy_from_slice(&frodo_msg[..32]);
     crypto::zeroize(frodo_sk_bytes.as_mut_slice());
     crypto::zeroize(&mut frodokem_wrap_key);
 
@@ -650,7 +663,7 @@ fn main() {
 
     // Layer 7: Serpent-256-SIV - recover DEK and decrypt
     fx.draw(0.6, &beat);
-    let dek_wrapped = match crypto::decrypt(&serpent_dek_wrap_key, DEK_WRAP) {
+    let mut dek_wrapped = match crypto::decrypt(&serpent_dek_wrap_key, DEK_WRAP) {
         Some(b) => b,
         None => { log_self_destruct("main: unwrap DEK failed"); watchdog::self_destruct(); }
     };
@@ -661,9 +674,9 @@ fn main() {
 
     // Combine shards: RSA ^ Kyber ^ McEliece ^ FrodoKEM ^ Dilithium
     // Note: Dilithium shard is blake3 hash of public key
-    let dilithium_pk_hash = blake3::hash(dilithium_vk_bytes).into();
+    let dilithium_pk_hash_bytes: [u8; 32] = *blake3::hash(dilithium_vk_bytes).as_bytes();
     let mut s_dilithium_arr = [0u8; 32];
-    s_dilithium_arr.copy_from_slice(&dilithium_pk_hash);
+    s_dilithium_arr.copy_from_slice(&dilithium_pk_hash_bytes);
     
     let mut combined_dek = xor5(&s_rsa_arr, &s_ky_arr, &s_mce_arr, &s_frodo_arr, &s_dilithium_arr);
     
@@ -689,18 +702,16 @@ fn main() {
     let siv_hash = sha256_hasher.finalize();
     verify_msg.extend_from_slice(&siv_hash);
     
-    let dilithium_vk_parsed = crystals_dilithium::ml_dsa_87::VerifyingKey::from_bytes(dilithium_vk_bytes).expect("Dilithium VK parse");
-    let dilithium_sig_parsed = crystals_dilithium::ml_dsa_87::Signature::from_bytes(dilithium_sig_bytes).expect("Dilithium sig parse");
-    if !dilithium_vk_parsed.verify(&verify_msg, &dilithium_sig_parsed).is_ok() {
+    if !dilithium_vk.verify(&verify_msg, dilithium_sig_bytes, None) {
         log_self_destruct("main: Dilithium signature verification failed");
         watchdog::self_destruct();
     }
 
     // Layer 8: Ed448 - verify signature
     fx.draw(0.8, &beat);
-    let ed_vk = VerifyingKey::from_bytes(ED_VK.try_into().expect("Ed448 VK len")).expect("Ed448 VK parse");
-    let ed_sig = Signature::from_bytes(ED_SIG.try_into().expect("Ed448 sig len")).expect("Ed448 sig parse");
-    if !ed_vk.verify(&verify_msg, &ed_sig).is_ok() {
+    let ed_vk = VerifyingKey::from_bytes(&ED_VK.try_into().expect("Ed448 VK len")).expect("Ed448 VK parse");
+    let ed_sig = ed448_goldilocks::Signature::from_bytes(&ED_SIG.try_into().expect("Ed448 sig len"));
+    if ed_vk.verify_raw(&ed_sig, &verify_msg).is_err() {
         log_self_destruct("main: Ed448 signature verification failed");
         watchdog::self_destruct();
     }

@@ -501,6 +501,7 @@ dependencies = [
  "libc",
  "ml-kem",
  "rand",
+ "rand_core 0.10.1",
  "rsa",
  "serpent",
  "sha2",

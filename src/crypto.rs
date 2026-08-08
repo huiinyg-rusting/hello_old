@@ -24,16 +24,31 @@ pub fn argon2id_hash(password: &[u8], salt: &[u8]) -> [u8; ARGON2_OUTPUT_LEN] {
 }
 
 pub fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
-    let mut hkdf = HmacSha256::new_from_slice(ikm).expect("HMAC key");
-    hkdf.update(salt);
-    hkdf.update(info);
+    // Manual HKDF-SHA256: Extract + Expand
+    use hmac::Mac;
+    let mut prk = <HmacSha256 as Mac>::new_from_slice(salt).expect("HMAC key");
+    prk.update(ikm);
+    let prk = prk.finalize().into_bytes();
     let mut okm = vec![0u8; out_len];
-    hkdf.finalize_into(&mut okm);
+    let mut t = Vec::new();
+    let mut counter: u8 = 1;
+    let mut pos = 0;
+    while pos < out_len {
+        let mut hmac = <HmacSha256 as Mac>::new_from_slice(&prk).expect("HMAC key");
+        hmac.update(&t);
+        hmac.update(info);
+        hmac.update(&[counter]);
+        t = hmac.finalize().into_bytes().to_vec();
+        let n = (out_len - pos).min(32);
+        okm[pos..pos + n].copy_from_slice(&t[..n]);
+        pos += n;
+        counter = counter.wrapping_add(1);
+    }
     okm
 }
 
-pub fn derive_wrapping_keys(master_key: &[u8; 32]) -> ([u8; 32]; 6) {
-    let labels = [
+pub fn derive_wrapping_keys(master_key: &[u8; 32]) -> [[u8; 32]; 6] {
+    let labels: [&[u8]; 6] = [
         b"wrap-rsa",
         b"wrap-kyber",
         b"wrap-mceliece",

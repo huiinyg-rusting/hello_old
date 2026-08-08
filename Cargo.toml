@@ -13,6 +13,8 @@ rand = { version = "0.8", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
 zeroize = "1.7"
 subtle = "2.5"
+rand_core = "0.10"
+hmac = "0.12"
 ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
 serpent = "0.6"
 cipher = "0.5"
@@ -45,6 +47,7 @@ sm3 = { version = "0.5", features = ["alloc"] }
 blake3 = "1.8"
 zeroize = "1.7"
 hmac = "0.12"
+rand_core = "0.10"
 
 [profile.release]
 opt-level = "z"

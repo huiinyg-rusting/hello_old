@@ -10,14 +10,11 @@ use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
-use zeroize::Zeroize;
 
 use ml_kem::{DecapsulationKey, Encapsulate, MlKem1024, KeyExport};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::EncodePrivateKey;
-use frodo_kem::Algorithm as FrodoAlgorithm;
-use crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey, RandomMode};
-use sm3::Sm3;
+use crystals_dilithium::{ml_dsa_87::Keypair, RandomMode};
 use blake3;
 
 mod siv_mod {
@@ -38,16 +35,33 @@ const ARGON2_OUTPUT_LEN: usize = 32;
 type HmacSha256 = Hmac<Sha256>;
 
 fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
-    let mut hkdf = HmacSha256::new_from_slice(ikm).expect("HMAC key");
-    hkdf.update(salt);
-    hkdf.update(info);
+    // Manual HKDF-SHA256: Extract + Expand
+    use sha2::Sha256;
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+    let mut prk = <HmacSha256 as Mac>::new_from_slice(salt).expect("HMAC key");
+    prk.update(ikm);
+    let prk = prk.finalize().into_bytes();
     let mut okm = vec![0u8; out_len];
-    hkdf.finalize_into(&mut okm);
+    let mut t = Vec::new();
+    let mut counter: u8 = 1;
+    let mut pos = 0;
+    while pos < out_len {
+        let mut hmac = <HmacSha256 as Mac>::new_from_slice(&prk).expect("HMAC key");
+        hmac.update(&t);
+        hmac.update(info);
+        hmac.update(&[counter]);
+        t = hmac.finalize().into_bytes().to_vec();
+        let n = (out_len - pos).min(32);
+        okm[pos..pos + n].copy_from_slice(&t[..n]);
+        pos += n;
+        counter = counter.wrapping_add(1);
+    }
     okm
 }
 
 fn derive_wrapping_keys(master_key: &[u8; 32]) -> [[u8; 32]; 6] {
-    let labels = [
+    let labels: [&[u8]; 6] = [
         b"wrap-rsa",
         b"wrap-kyber",
         b"wrap-mceliece",
@@ -71,12 +85,6 @@ fn sha3_256(data: &[u8]) -> [u8; 32] {
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().into()
-}
-
-fn sm3_256(data: &[u8]) -> [u8; 32] {
-    let mut h = Sm3::new();
     h.update(data);
     h.finalize().into()
 }
@@ -124,6 +132,45 @@ fn zeroize(buf: &mut [u8]) {
 }
 
 struct Rng(u64);
+
+impl rand_core::TryRng for Rng {
+    type Error = std::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.next_u64() as u32)
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.next_u64())
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        self.fill(dst);
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for Rng {}
+
+// OS-backed RNG satisfying rand_core 0.10 traits for frodo-kem
+struct SysRng;
+
+impl rand_core::TryRng for SysRng {
+    type Error = std::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        getrandom(&mut b).expect("getrandom failed");
+        Ok(u32::from_le_bytes(b))
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        getrandom(&mut b).expect("getrandom failed");
+        Ok(u64::from_le_bytes(b))
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        getrandom(dst).expect("getrandom failed");
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for SysRng {}
 
 impl Rng {
     fn new(seed: u64) -> Self {
@@ -352,12 +399,12 @@ fn main() {
     // The KEK (k1||k2) is the password-derived key that wraps every KEM secret key.
     // Now using HKDF to derive 6 independent wrapping keys
     let wrapping_keys = derive_wrapping_keys(&kek[..32].try_into().expect("kek slice"));
-    let rsa_wrap_key = wrapping_keys[0];
-    let kyber_wrap_key = wrapping_keys[1];
-    let mceliece_wrap_key = wrapping_keys[2];
-    let frodokem_wrap_key = wrapping_keys[3];
-    let dilithium_wrap_key = wrapping_keys[4];
-    let serpent_dek_wrap_key = wrapping_keys[5];
+    let mut rsa_wrap_key = wrapping_keys[0];
+    let mut kyber_wrap_key = wrapping_keys[1];
+    let mut mceliece_wrap_key = wrapping_keys[2];
+    let mut frodokem_wrap_key = wrapping_keys[3];
+    let mut dilithium_wrap_key = wrapping_keys[4];
+    let mut serpent_dek_wrap_key = wrapping_keys[5];
 
     println!("cargo:warning===== BUILD INFO ====");
     println!("cargo:warning=Plaintext chars: {}", content.len());
@@ -424,13 +471,13 @@ fn main() {
 
     // ---- The three 32-byte shards XOR into the 256-bit Serpent DEK ----
     // Now with 5 shards: RSA, Kyber, McEliece, FrodoKEM, Dilithium
-    let mut dek = xor32(&s_rsa, &s_ky, &s_mce);
-    
+
     // ---- [Algorithm 5] FrodoKEM-1344: keypair + encapsulation ----
     use frodo_kem::Algorithm as FrodoAlgorithm;
     let frodo_alg = FrodoAlgorithm::FrodoKem1344Aes;
     let frodo_params = frodo_alg.params();
-    let (frodo_pk, frodo_sk) = frodo_alg.generate_keypair(&mut rng);
+    let mut sys_rng = SysRng;
+    let (frodo_pk, frodo_sk) = frodo_alg.generate_keypair(&mut sys_rng);
     
     // Generate 32-byte shared secret (shard) and salt
     let mut s_frodo = [0u8; 32];
@@ -440,7 +487,7 @@ fn main() {
     
     let (ct_frodo, _sh_frodo) = frodo_alg.encapsulate(&frodo_pk, &s_frodo, &salt).expect("frodokem encapsulate");
     
-    let frodokem_sk_bytes = frodo_sk.to_vec();
+    let frodokem_sk_bytes = frodo_sk.as_ref().to_vec();
     write_blob(
         &out_dir,
         "frodo_sk_wrap.bin",
@@ -454,7 +501,7 @@ fn main() {
     
     // ---- [Algorithm 6] CRYSTALS-Dilithium-5 (ML-DSA-87): keypair + signing ----
     let dilithium_keypair: Keypair = Keypair::generate(None).expect("Dilithium keypair generation");
-    let dilithium_vk = dilithium_keypair.public;
+    let dilithium_vk = &dilithium_keypair.public;
     let dilithium_sk_bytes = dilithium_keypair.secret.to_bytes().to_vec();
     write_blob(
         &out_dir,
