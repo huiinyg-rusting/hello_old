@@ -275,7 +275,11 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     draw_hline(3, width, C_CYAN);
 
     let body_top = 4;
-    let body_bottom = height.saturating_sub(1);
+    // Reserve the bottom rows so footer/hint never collide with content or
+    // scroll off-screen.
+    let foot_row = height.saturating_sub(1);
+    let hline_row = height.saturating_sub(2);
+    let body_bottom = height.saturating_sub(3);
     let per_page = body_bottom.saturating_sub(body_top) + 1;
 
     let mut content: Vec<String> = Vec::new();
@@ -288,7 +292,6 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     let mut idx = 0usize;
     let mut first = true;
     let mut quit = false;
-    let mut last_row = body_top;
     loop {
         if !first {
             fill_bg_full(width, height);
@@ -305,39 +308,38 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
 
         let page_end = (idx + per_page).min(content.len());
         let mut row = body_top;
-        while idx < page_end {
-            reveal_row_fast(row, &content[idx], width, height, unlock_time, &mut rng, feed);
+        for i in idx..page_end {
+            reveal_row_fast(row, &content[i], width, height, unlock_time, &mut rng, feed);
             row += 1;
-            idx += 1;
         }
-        last_row = row.saturating_sub(1);
-        if idx >= content.len() || quit {
+        idx = page_end;
+        if idx < content.len() && !quit {
+            let hint = "  ▸ 按任意键翻页  ";
+            let hp = center_pad(hint, width);
+            cursor(body_bottom, 1);
+            print!(
+                "{}{}{}{}{}{}{}",
+                C_BG_DARK, C_DIM, " ".repeat(hp), C_YELLOW, hint,
+                " ".repeat(width.saturating_sub(hp + display_width(hint))), C_RESET
+            );
+            flush();
+            if page_wait(feed) {
+                quit = true;
+            }
+        } else {
             break;
-        }
-
-        let hint = "  ▸ 按任意键翻页 · 按 q 退出并烧毁  ";
-        let hp = center_pad(hint, width);
-        cursor(body_bottom, 1);
-        print!(
-            "{}{}{}{}{}{}{}",
-            C_BG_DARK, C_DIM, " ".repeat(hp), C_YELLOW, hint,
-            " ".repeat(width.saturating_sub(hp + display_width(hint))), C_RESET
-        );
-        flush();
-        if page_wait(feed) {
-            quit = true;
         }
     }
 
+    // Draw the footer in the reserved bottom slots.
+    draw_hline(hline_row, width, C_CYAN);
+    let foot = "—— 守门人 ——";
     if !quit {
-        draw_hline(last_row + 1, width, C_CYAN);
-        let foot = "—— 守门人 ——";
-        reveal_row_fast(last_row + 2, foot, width, height, unlock_time, &mut rng, feed);
-        last_row += 2;
+        reveal_row_fast(foot_row, foot, width, height, unlock_time, &mut rng, feed);
     }
     draw_status_bar(width, height, unlock_time);
     sleep(800);
-    last_row + 1
+    foot_row
 }
 
 /// Wait for a keypress while in raw mode. Returns true if the user pressed q/Q
