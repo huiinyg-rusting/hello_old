@@ -63,7 +63,6 @@ const CT_FRODO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_frodo.bin")
 const FRODO_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/frodo_sk_wrap.bin"));
 
 // Layer 6: CRYSTALS-Dilithium-5 (ML-DSA-87)
-const DILITHIUM_SK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_sk_wrap.bin"));
 const DILITHIUM_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_vk.bin"));
 const DILITHIUM_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dilithium_sig.bin"));
 

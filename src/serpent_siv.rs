@@ -43,7 +43,7 @@ fn dbl(s: &mut [u8; B]) {
 
 fn serpent_enc_block(k: &[u8], in16: &[u8; B]) -> [u8; B] {
     let cipher = Serpent::new_from_slice(k).expect("serpent key length");
-    let mut blk = Block16::from_slice(in16).clone();
+    let mut blk: Block16 = (*in16).into();
     cipher.encrypt_block(&mut blk);
     let mut out = [0u8; B];
     out.copy_from_slice(blk.as_slice());
@@ -123,10 +123,13 @@ fn ctr_mask(v: &mut [u8; B]) {
     v[7] &= 0x7f;
 }
 
+// NOTE: this file is `include!`d verbatim in both build.rs (uses encrypt only)
+// and the runtime bin (uses decrypt only), so each side sees the other fun dead.
+#[allow(dead_code)]
 pub fn siv_encrypt(key32: &[u8], ad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let k1 = &key32[..16];
     let k2 = &key32[16..32];
-    let mut v = s2v(k1, &[ad], plaintext);
+    let v = s2v(k1, &[ad], plaintext);
     let mut q = v;
     ctr_mask(&mut q);
     let mut counter = q;
@@ -147,6 +150,7 @@ pub fn siv_encrypt(key32: &[u8], ad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     out
 }
 
+#[allow(dead_code)]
 pub fn siv_decrypt(key32: &[u8], ad: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
     if ciphertext.len() < B {
         return None;

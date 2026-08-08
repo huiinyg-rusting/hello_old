@@ -5,7 +5,6 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use getrandom::getrandom;
-use hmac::Hmac;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::process::Command;
@@ -31,8 +30,6 @@ const ARGON2_ITERATIONS: u32 = 3;
 const ARGON2_PARALLELISM: u32 = 4;
 const ARGON2_SALT_LEN: usize = 32;
 const ARGON2_OUTPUT_LEN: usize = 32;
-
-type HmacSha256 = Hmac<Sha256>;
 
 fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
     // Manual HKDF-SHA256: Extract + Expand

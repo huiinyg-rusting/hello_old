@@ -1,0 +1,6 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "force-frame-pointers=yes",
+    "-C", "linker=clang",
+]

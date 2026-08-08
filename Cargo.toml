@@ -57,19 +57,7 @@ codegen-units = 1
 strip = "symbols"
 debug = false
 
-[target.'cfg(target_os = "linux")'.rustflags]
-# Control Flow Integrity + Shadow Call Stack
-# Note: CFI requires nightly, shadow-call-stack requires aarch64 or x86_64 with clang
-# For stable: use -Z sanitizer=cfi (nightly only) or rely on hardware CET
-# These flags work with nightly toolchain
-# rustflags = ["-Z", "sanitizer=cfi", "-Z", "sanitizer=shadow-call-stack"]
 
-# Stable-hardening flags
-rustflags = [
-    "-C", "target-cpu=native",
-    "-C", "force-frame-pointers=yes",
-    "-C", "default-linker-libraries=clang",
-]
 
 # For nightly CFI, uncomment and use nightly:
 # [profile.release]

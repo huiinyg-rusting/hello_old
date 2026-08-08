@@ -186,7 +186,7 @@ fn reveal_row_fast(row: usize, line: &str, width: usize, height: usize, unlock_t
         );
         draw_status_bar(width, height, unlock_time);
         flush();
-        sleep(6);
+        sleep(15);
         if i % 3 == 0 {
             feed();
         }
@@ -266,7 +266,7 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> usize {
     let mut rng = Rng::new();
 
     fill_bg_full(width, height);
-    fullscreen_garble(width, height, 6, 25, &mut rng, feed);
+    fullscreen_garble(width, height, 20, 100, &mut rng, feed);
     scanline_effect(width, height, &mut rng, feed);
 
     fill_bg_full(width, height);
@@ -365,7 +365,7 @@ pub fn burn_with_progress(width: usize, height: usize, feed: &dyn Fn()) {
         for step in 0..=5 {
             let prog = 1.0 - (step as f32 / 5.0);
             draw_progress_bars_all(width, height, &measures, i, prog, feed);
-            sleep(80);
+            sleep(10);
         }
     }
     draw_progress_bars_all(width, height, &measures, 0, 0.0, feed);

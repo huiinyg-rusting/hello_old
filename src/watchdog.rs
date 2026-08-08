@@ -7,11 +7,6 @@ use std::fs::OpenOptions;
 
 use crate::crypto;
 
-fn log_self_destruct(msg: &str) {
-    let _ = OpenOptions::new().create(true).append(true).open("/tmp/watchdog_debug.log")
-        .and_then(|mut f| writeln!(f, "{}", msg));
-}
-
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 fn log_debug(msg: &str) {
@@ -44,7 +39,6 @@ pub fn self_destruct() -> ! {
             let _ = f.flush();
         }
         std::process::exit(1);
-        panic!("exit(1) returned!");
     }
     loop {
         unsafe {
