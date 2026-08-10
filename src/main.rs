@@ -66,6 +66,7 @@ const DEK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dek_wrap.bin")
 const ED_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_vk.bin"));
 const ED_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_sig.bin"));
 
+#[cfg(target_os = "linux")]
 struct SecBuf {
     base: *mut u8,
     ptr: *mut u8,
@@ -73,6 +74,7 @@ struct SecBuf {
     total: usize,
 }
 
+#[cfg(target_os = "linux")]
 impl SecBuf {
     fn new(len: usize) -> Option<Self> {
         let page = 4096usize;
@@ -115,6 +117,7 @@ impl SecBuf {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for SecBuf {
     fn drop(&mut self) {
         unsafe {
@@ -126,6 +129,86 @@ impl Drop for SecBuf {
             std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
             libc::munlock(self.ptr as *mut libc::c_void, self.usable);
             libc::munmap(self.base as *mut libc::c_void, self.total);
+        }
+    }
+}
+
+// Windows: VirtualAlloc guard pages + VirtualLock + VirtualProtect, mirroring
+// the Linux mmap/mlock/mprotect layout (guard pages before/after the payload).
+#[cfg(target_os = "windows")]
+struct SecBuf {
+    base: *mut u8,
+    ptr: *mut u8,
+    usable: usize,
+    #[allow(dead_code)]
+    total: usize,
+}
+
+#[cfg(target_os = "windows")]
+impl SecBuf {
+    fn new(len: usize) -> Option<Self> {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, VirtualFree, VirtualLock, VirtualProtect, MEM_COMMIT, MEM_RESERVE,
+            PAGE_NOACCESS, PAGE_READWRITE,
+        };
+        const PAGE: usize = 4096;
+        let usable = if len <= PAGE { PAGE } else { (len + PAGE - 1) & !(PAGE - 1) };
+        let total = usable + 2 * PAGE;
+        unsafe {
+            let base = VirtualAlloc(
+                std::ptr::null(),
+                total,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            );
+            if base.is_null() {
+                return None;
+            }
+            let ptr = (base as *mut u8).add(PAGE);
+            let mut old: u32 = 0;
+            if VirtualLock(ptr as *const _, usable) == 0 {
+                VirtualFree(base, 0, 0x8000); // MEM_RELEASE
+                return None;
+            }
+            VirtualProtect(base as *const _, PAGE, PAGE_NOACCESS, &mut old);
+            VirtualProtect(ptr.add(usable) as *const _, PAGE, PAGE_NOACCESS, &mut old);
+            Some(SecBuf { base: base as *mut u8, ptr, usable, total })
+        }
+    }
+
+    fn lock_ro(&self) {
+        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READONLY};
+        unsafe {
+            let mut old: u32 = 0;
+            VirtualProtect(self.ptr as *const _, self.usable, PAGE_READONLY, &mut old);
+        }
+    }
+
+    fn lock_none(&self) {
+        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_NOACCESS};
+        unsafe {
+            let mut old: u32 = 0;
+            VirtualProtect(self.ptr as *const _, self.usable, PAGE_NOACCESS, &mut old);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for SecBuf {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{
+            VirtualFree, VirtualProtect, VirtualUnlock, PAGE_READWRITE,
+        };
+        unsafe {
+            let mut old: u32 = 0;
+            VirtualProtect(self.ptr as *const _, self.usable, PAGE_READWRITE, &mut old);
+            let bytes = std::slice::from_raw_parts_mut(self.ptr, self.usable);
+            for b in bytes.iter_mut() {
+                std::ptr::write_volatile(b, 0);
+            }
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            VirtualUnlock(self.ptr as *const _, self.usable);
+            VirtualFree(self.base as *mut _, 0, 0x8000); // MEM_RELEASE
         }
     }
 }
@@ -261,11 +344,29 @@ fn anti_debug_checks() -> bool {
     if watchdog::tracer_pid() != 0 {
         return false;
     }
+    #[cfg(target_os = "linux")]
     unsafe {
         if libc::prctl(libc::PR_SET_PTRACER, 0, 0, 0, 0) == -1 {
         }
     }
-    
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            CheckRemoteDebuggerPresent, IsDebuggerPresent,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        if unsafe { IsDebuggerPresent() } != 0 {
+            return false;
+        }
+        let mut present: i32 = 0;
+        unsafe {
+            CheckRemoteDebuggerPresent(GetCurrentProcess(), &mut present);
+        }
+        if present != 0 {
+            return false;
+        }
+    }
+
     let start = Instant::now();
     std::hint::black_box(0);
     let elapsed = start.elapsed();
@@ -339,6 +440,7 @@ fn main() {
     }
 
     signal::ignore();
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
         libc::prctl(0x59616d61, 0, 0, 0, 0);

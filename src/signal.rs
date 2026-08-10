@@ -1,5 +1,13 @@
+// Windows: Ctrl-C handling is done via the console control handler installed at
+// startup in `tui`; there is no POSIX sigaction. Keep the same public API as a
+// no-op so callers compile unchanged.
+#[cfg(not(target_os = "linux"))]
+pub fn ignore() {}
+
+#[cfg(target_os = "linux")]
 use libc::sighandler_t;
 
+#[cfg(target_os = "linux")]
 pub fn ignore() {
     unsafe {
         let sa = libc::sigaction {

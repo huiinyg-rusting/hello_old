@@ -1,6 +1,18 @@
 use std::io::{IsTerminal, Read, Write};
 
 pub fn read_password() -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        return read_password_linux();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return read_password_windows();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_password_linux() -> Option<Vec<u8>> {
     if std::io::stdin().is_terminal() {
         unsafe {
             let fd = libc::STDIN_FILENO;
@@ -45,6 +57,72 @@ pub fn read_password() -> Option<Vec<u8>> {
                     print!("\n");
                     let _ = std::io::stdout().flush();
                     return Some(buf);
+                }
+            }
+        }
+    }
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    Some(line.trim_end_matches(['\r', '\n']).as_bytes().to_vec())
+}
+
+// Windows: use the console input handle with ENABLE_ECHO_INPUT cleared so typed
+// characters are not echoed, then read from stdin. Falls back to a plain
+// read_line when not attached to a terminal (e.g. piped input).
+#[cfg(target_os = "windows")]
+fn read_password_windows() -> Option<Vec<u8>> {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_ECHO_INPUT,
+        ENABLE_LINE_INPUT, STD_INPUT_HANDLE,
+    };
+
+    if std::io::stdin().is_terminal() {
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if !handle.is_null() {
+                let mut mode: CONSOLE_MODE = 0;
+                if GetConsoleMode(handle, &mut mode) != 0 {
+                    let new_mode = mode & !ENABLE_ECHO_INPUT & !ENABLE_LINE_INPUT;
+                    if SetConsoleMode(handle, new_mode) != 0 {
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 64];
+                        loop {
+                            match std::io::stdin().read(&mut chunk) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    for &byte in &chunk[..n] {
+                                        if byte == b'\n' || byte == b'\r' {
+                                            SetConsoleMode(handle, mode);
+                                            print!("\n");
+                                            let _ = std::io::stdout().flush();
+                                            return Some(buf);
+                                        }
+                                        if byte == 0x7f || byte == 0x08 {
+                                            if !buf.is_empty() {
+                                                buf.pop();
+                                                print!("\x08 \x08");
+                                                let _ = std::io::stdout().flush();
+                                            }
+                                            continue;
+                                        }
+                                        if byte >= 0x20 && byte <= 0x7e {
+                                            buf.push(byte);
+                                            print!("*");
+                                            let _ = std::io::stdout().flush();
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        SetConsoleMode(handle, mode);
+                        print!("\n");
+                        let _ = std::io::stdout().flush();
+                        return Some(buf);
+                    }
                 }
             }
         }

@@ -44,6 +44,7 @@ impl Rng {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn term_width() -> usize {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
@@ -55,6 +56,7 @@ pub fn term_width() -> usize {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn term_height() -> usize {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
@@ -64,6 +66,51 @@ pub fn term_height() -> usize {
             24
         }
     }
+}
+
+// Windows: query the console screen buffer via GetConsoleScreenBufferInfo.
+#[cfg(target_os = "windows")]
+pub fn term_width() -> usize {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !h.is_null() {
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(h, &mut info) != 0 && info.srWindow.Right > info.srWindow.Left {
+                return (info.srWindow.Right - info.srWindow.Left + 1) as usize;
+            }
+        }
+        80
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn term_height() -> usize {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !h.is_null() {
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(h, &mut info) != 0 && info.srWindow.Bottom > info.srWindow.Top {
+                return (info.srWindow.Bottom - info.srWindow.Top + 1) as usize;
+            }
+        }
+        24
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub fn term_width() -> usize {
+    80
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub fn term_height() -> usize {
+    24
 }
 
 fn char_width(c: char) -> usize {
@@ -393,6 +440,52 @@ fn draw_page(content: &[String], page: Option<&Vec<usize>>, top: usize, bottom: 
 
 enum Nav { Next, Prev, Burn }
 
+// Returns true if a key is waiting to be read, polling stdin with a timeout so
+// the watchdog feed can keep ticking. Cross-platform: poll() on Unix,
+// WaitForSingleObject on the console input handle on Windows.
+#[cfg(target_os = "linux")]
+fn input_ready() -> bool {
+    unsafe {
+        let mut pfd = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let r = libc::poll(&mut pfd, 1, 100);
+        r > 0 && (pfd.revents & libc::POLLIN) != 0
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn input_ready() -> bool {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h.is_null() {
+            return false;
+        }
+        WaitForSingleObject(h, 100) == WAIT_OBJECT_0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn input_ready() -> bool {
+    // No portable timeout-poll on other platforms; a blocking read would stall
+    // the watchdog, so treat input as never ready and rely on non-tty handling.
+    false
+}
+
+fn read_byte() -> Option<u8> {
+    let mut b = [0u8; 1];
+    match io::stdin().read(&mut b) {
+        Ok(0) => None,
+        Ok(_) => Some(b[0]),
+        Err(_) => None,
+    }
+}
+
 /// Wait for a navigation key while in raw mode.
 /// space / Enter / →  = Next page, p / ← = Previous page, q = open burn dialog.
 /// Non-tty input advances immediately (Next) so piped/scripted runs never block.
@@ -404,64 +497,48 @@ fn nav_wait(feed: &dyn Fn()) -> Nav {
     }
     let orig = raw_on();
     loop {
-        unsafe {
-            let mut pfd = libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let r = libc::poll(&mut pfd, 1, 100);
-            if r > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                let mut b = [0u8; 1];
-                if io::stdin().read(&mut b).unwrap_or(0) == 0 {
-                    break;
+        if input_ready() {
+            match read_byte() {
+                Some(b' ') | Some(b'\n') | Some(b'\r') => {
+                    raw_off(&orig);
+                    return Nav::Next;
                 }
-                match b[0] {
-                    b' ' | b'\n' | b'\r' => {
+                Some(b'p') | Some(b'P') => {
+                    raw_off(&orig);
+                    return Nav::Prev;
+                }
+                Some(b'q') | Some(b'Q') => {
+                    raw_off(&orig);
+                    return Nav::Burn;
+                }
+                Some(0x1b) => {
+                    // possible arrow key CSI sequence: ESC [ <final>
+                    let mut seq = [0u8; 2];
+                    let n = io::stdin().read(&mut seq).unwrap_or(0);
+                    if n == 2 && seq[0] == b'[' {
+                        raw_off(&orig);
+                        return match seq[1] {
+                            b'C' => Nav::Next,
+                            b'D' => Nav::Prev,
+                            _ => Nav::Next,
+                        };
+                    } else if n == 0 {
                         raw_off(&orig);
                         return Nav::Next;
                     }
-                    b'p' | b'P' => {
-                        raw_off(&orig);
-                        return Nav::Prev;
-                    }
-                    b'q' | b'Q' => {
-                        raw_off(&orig);
-                        return Nav::Burn;
-                    }
-                    0x1b => {
-                        // possible arrow key CSI sequence: ESC [ <final>
-                        let mut seq = [0u8; 2];
-                        let n = io::stdin().read(&mut seq).unwrap_or(0);
-                        if n == 2 && seq[0] == b'[' {
-                            raw_off(&orig);
-                            return match seq[1] {
-                                b'C' => Nav::Next,
-                                b'D' => Nav::Prev,
-                                _ => Nav::Next,
-                            };
-                        } else if n == 0 {
-                            raw_off(&orig);
-                            return Nav::Next;
-                        }
-                        // not an arrow; treat as Next
-                        raw_off(&orig);
-                        return Nav::Next;
-                    }
-                    _ => {
-                        continue;
-                    }
+                    // not an arrow; treat as Next
+                    raw_off(&orig);
+                    return Nav::Next;
                 }
-            } else if r == 0 {
-                feed();
-                continue;
-            } else {
-                break;
+                _ => {
+                    continue;
+                }
             }
+        } else {
+            feed();
+            continue;
         }
     }
-    raw_off(&orig);
-    Nav::Next
 }
 
 
@@ -757,6 +834,7 @@ pub fn show_cursor() {
     flush();
 }
 
+#[cfg(target_os = "linux")]
 fn raw_on() -> libc::termios {
     unsafe {
         let mut orig: libc::termios = std::mem::zeroed();
@@ -770,11 +848,52 @@ fn raw_on() -> libc::termios {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn raw_off(orig: &libc::termios) {
     unsafe {
         libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, orig);
     }
 }
+
+// Windows raw mode: disable line-buffering/echo via SetConsoleMode.
+#[cfg(target_os = "windows")]
+fn raw_on() -> u32 {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_ECHO_INPUT,
+        ENABLE_LINE_INPUT, STD_INPUT_HANDLE,
+    };
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h.is_null() {
+            return 0;
+        }
+        let mut mode: CONSOLE_MODE = 0;
+        if GetConsoleMode(h, &mut mode) != 0 {
+            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT & !ENABLE_LINE_INPUT);
+        }
+        mode
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn raw_off(orig: &u32) {
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if !h.is_null() {
+            SetConsoleMode(h, *orig);
+        }
+    }
+}
+
+// Other Unixes: no portable raw mode; fall back to termios-like no-op types.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn raw_on() -> u8 {
+    0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn raw_off(_orig: &u8) {}
 
 pub fn center_pad(line: &str, width: usize) -> usize {
     let w = display_width(line);
@@ -816,27 +935,15 @@ pub fn wait_for_quit(feed: &dyn Fn()) {
     }
     let orig = raw_on();
     loop {
-        unsafe {
-            let mut pfd = libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let r = libc::poll(&mut pfd, 1, 100);
-            if r > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                let mut b = [0u8; 1];
-                if io::stdin().read(&mut b).unwrap_or(0) == 0 {
-                    break;
-                }
-                if b[0] == b'q' || b[0] == b'Q' {
-                    break;
-                }
-            } else if r == 0 {
-                feed();
-                continue;
-            } else {
-                break;
+        if input_ready() {
+            match read_byte() {
+                Some(b'q') | Some(b'Q') => break,
+                Some(_) => {}
+                None => break,
             }
+        } else {
+            feed();
+            continue;
         }
         feed();
     }
@@ -864,26 +971,17 @@ fn confirm_burn(feed: &dyn Fn(), target: char) -> bool {
     }
     let orig = raw_on();
     loop {
-        unsafe {
-            let mut pfd = libc::pollfd {
-                fd: 0,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let r = libc::poll(&mut pfd, 1, 100);
-            if r > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                let mut b = [0u8; 1];
-                if io::stdin().read(&mut b).unwrap_or(0) == 0 {
-                    break;
+        if input_ready() {
+            match read_byte() {
+                Some(b) => {
+                    raw_off(&orig);
+                    return (b as char).eq_ignore_ascii_case(&target);
                 }
-                raw_off(&orig);
-                return (b[0] as char).eq_ignore_ascii_case(&target);
-            } else if r == 0 {
-                feed();
-                continue;
-            } else {
-                break;
+                None => break,
             }
+        } else {
+            feed();
+            continue;
         }
     }
     raw_off(&orig);

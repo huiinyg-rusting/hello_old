@@ -10,6 +10,7 @@ pub fn stop() {
     RUNNING.store(false, Ordering::SeqCst);
 }
 
+#[cfg(target_os = "linux")]
 pub fn self_destruct() -> ! {
     // If environment variable NO_SELF_DESTRUCT is set, exit gracefully for debugging
     if std::env::var("NO_SELF_DESTRUCT").is_ok() {
@@ -23,6 +24,17 @@ pub fn self_destruct() -> ! {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn self_destruct() -> ! {
+    if std::env::var("NO_SELF_DESTRUCT").is_ok() {
+        std::process::exit(1);
+    }
+    loop {
+        std::process::exit(0xC0000409u32 as i32); // STATUS_STACK_BUFFER_OVERRUN (fail-fast)
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn tracer_pid() -> u32 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
@@ -36,6 +48,14 @@ pub fn tracer_pid() -> u32 {
     0
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn tracer_pid() -> u32 {
+    // Windows: debugger detection is handled via IsDebuggerPresent /
+    // CheckRemoteDebuggerPresent in anti_debug_checks(). Report no tracer here.
+    0
+}
+
+#[cfg(target_os = "linux")]
 fn read_self_exe_sha() -> [u8; 32] {
     let mut out = [0u8; 32];
     if let Ok(bytes) = std::fs::read("/proc/self/exe") {
@@ -47,7 +67,6 @@ fn read_self_exe_sha() -> [u8; 32] {
 pub fn start(expected_key_sha: [u8; 32], key_ptr: usize, key_len: usize) -> Arc<Mutex<Instant>> {
     let feed = Arc::new(Mutex::new(Instant::now()));
     let f = feed.clone();
-    let exe_sha = read_self_exe_sha();
     std::thread::spawn(move || {
         while RUNNING.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(400));
@@ -56,21 +75,25 @@ pub fn start(expected_key_sha: [u8; 32], key_ptr: usize, key_len: usize) -> Arc<
             if stale || traced {
                 self_destruct();
             }
-            if std::fs::metadata("/proc/self/exe").is_ok() {
-                if read_self_exe_sha() != exe_sha {
-                    self_destruct();
+            #[cfg(target_os = "linux")]
+            {
+                let exe_sha = read_self_exe_sha();
+                if std::fs::metadata("/proc/self/exe").is_ok() {
+                    if read_self_exe_sha() != exe_sha {
+                        self_destruct();
+                    }
                 }
             }
             let mut actual = [0u8; 64];
             unsafe {
-            if key_len > 64 {
-                self_destruct();
-            }
-                std::ptr::copy_nonoverlapping(key_ptr as *const u8, actual.as_mut_ptr(), key_len);
-            }
-                if crypto::sha3_256(&actual[..key_len]) != expected_key_sha {
+                if key_len > 64 {
                     self_destruct();
                 }
+                std::ptr::copy_nonoverlapping(key_ptr as *const u8, actual.as_mut_ptr(), key_len);
+            }
+            if crypto::sha3_256(&actual[..key_len]) != expected_key_sha {
+                self_destruct();
+            }
             unsafe {
                 for b in actual.iter_mut() {
                     std::ptr::write_volatile(b, 0);

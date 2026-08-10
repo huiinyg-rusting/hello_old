@@ -297,6 +297,19 @@ fn xor32(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 }
 
 fn main() {
+    // Heavy crypto (McEliece-6960119f keygen, FrodoKEM, RSA-4096) uses multi-MB
+    // stack arrays that exceed the default 1MB Windows main-thread stack, so run
+    // everything on a dedicated thread with a large stack.
+    std::thread::Builder::new()
+        .name("build-worker".into())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(build_main)
+        .expect("failed to spawn build thread")
+        .join()
+        .expect("build thread panicked");
+}
+
+fn build_main() {
     // Print project title at build time
     println!("hello_old — Time-Gated Decryption Binary");
     println!("cargo:rerun-if-changed=shared.rs");
