@@ -33,7 +33,7 @@ use siv_mod::{siv_decrypt};
 // Build-time embedded blobs for 7-layer runtime decryption
 const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin")); // legacy, unused now
 const TS_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts.bin"));
-const TS_PLAIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts_plain.bin"));
+const TS_GUARD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts_guard.bin"));
 const VM_PROG_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmprog.bin"));
 const KM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/km.bin"));
 const SALT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/salt.bin"));
@@ -293,11 +293,51 @@ fn parse_meta(meta: &[u8]) -> Vec<String> {
 fn refuse(lines: &[String], feed: &dyn Fn()) -> ! {
     let unlock_time = format_unix(shared::OPEN_TIMESTAMP_UNIX_SECONDS);
     tui::show(lines, feed, &unlock_time);
-    let width = tui::term_width();
-    let height = tui::term_height();
-    tui::burn_with_progress(width, height, feed);
     watchdog::stop();
+    tui::show_cursor();
     std::process::exit(1);
+}
+
+/// Verify the timestamp integrity guard. The guard stores 8 XOR-masked
+/// fragments, 8 random masks, a random 8-byte recomposition order and a
+/// SHA3-256 chain over (frag, mask) pairs walked in that order. All pieces are
+/// embedded independently; to forge a new open time an attacker would have to
+/// rewrite every fragment, every mask, the order and the chain consistently —
+/// a single stray byte makes the recomposed value fail the hash check.
+fn ts_guard_valid(ts: u64) -> bool {
+    if TS_GUARD.len() != 8 * 8 + 8 * 8 + 8 + 32 {
+        return false;
+    }
+    let mut frags = [0u64; 8];
+    let mut masks = [0u64; 8];
+    let mut order = [0u8; 8];
+    for i in 0..8 {
+        let mut f = [0u8; 8];
+        f.copy_from_slice(&TS_GUARD[i * 8..i * 8 + 8]);
+        frags[i] = u64::from_le_bytes(f);
+    }
+    for i in 0..8 {
+        let mut m = [0u8; 8];
+        m.copy_from_slice(&TS_GUARD[64 + i * 8..64 + i * 8 + 8]);
+        masks[i] = u64::from_le_bytes(m);
+    }
+    order.copy_from_slice(&TS_GUARD[128..136]);
+    let expected_chain = &TS_GUARD[136..];
+
+    // Recover the open time from every fragment; all must agree.
+    for i in 0..8 {
+        if frags[i] ^ masks[i] != ts {
+            return false;
+        }
+    }
+
+    let mut chain_input = Vec::with_capacity(128);
+    for i in 0..8 {
+        let idx = (order[i] as usize) % 8;
+        chain_input.extend_from_slice(&frags[idx].to_le_bytes());
+        chain_input.extend_from_slice(&masks[idx].to_le_bytes());
+    }
+    crypto::ct_eq(&crypto::sha3_256(&chain_input), expected_chain)
 }
 
 fn consensus(results: &[(String, f64, f64)]) -> Option<(f64, f64)> {
@@ -485,7 +525,10 @@ fn main() {
             Some(p) if !p.is_empty() => p,
             _ => {
                 if !std::io::stdin().is_terminal() {
-                    watchdog::self_destruct();
+                    // No TTY: no password can arrive. Exit cleanly instead of
+                    // self-destructing — the door simply stays shut.
+                    tui::show_cursor();
+                    std::process::exit(1);
                 }
                 tui::dynamic_center_error("Invalid password, try again", &noop);
                 continue;
@@ -509,7 +552,9 @@ fn main() {
             None => {
                 zeroize(&mut bk);
                 if !std::io::stdin().is_terminal() {
-                    watchdog::self_destruct();
+                    // No TTY: no retry will help. Exit cleanly.
+                    tui::show_cursor();
+                    std::process::exit(1);
                 }
                 timing_equalize();
                 tui::dynamic_center_error("Invalid password, try again", &noop);
@@ -552,6 +597,8 @@ fn main() {
 
     let key_sha = crypto::sha3_256(&key_copy64(&key_buf));
     let feed: Arc<Mutex<Instant>> = watchdog::start(key_sha, key_buf.ptr as usize, 64);
+    #[cfg(target_os = "windows")]
+    watchdog::prevent_termination();
     key_buf.lock_ro();
     let beat = || {
         *feed.lock().unwrap() = Instant::now();
@@ -680,11 +727,7 @@ fn main() {
     };
 
     {
-        let plain_ts = u64::from_le_bytes([
-            TS_PLAIN[0], TS_PLAIN[1], TS_PLAIN[2], TS_PLAIN[3],
-            TS_PLAIN[4], TS_PLAIN[5], TS_PLAIN[6], TS_PLAIN[7],
-        ]);
-        if plain_ts != shared::OPEN_TIMESTAMP_UNIX_SECONDS || plain_ts != open_ts {
+        if !ts_guard_valid(open_ts) {
             watchdog::self_destruct();
         }
     }

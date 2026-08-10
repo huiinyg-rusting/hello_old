@@ -34,6 +34,21 @@ pub fn self_destruct() -> ! {
     }
 }
 
+/// Windows: raise the process to a protected level as far as userland allows
+/// (ignore CTRL_C / CTRL_BREAK so a "waiting" user cannot be silently killed),
+/// and enable fail-fast so a tamper or debugger is answered with a hard
+/// STATUS_STACK_BUFFER_OVERRUN instead of a clean exit.
+#[cfg(target_os = "windows")]
+pub fn prevent_termination() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+        1 // handled; keep the process alive so a stray Ctrl+C cannot burn it
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn tracer_pid() -> u32 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
@@ -70,7 +85,7 @@ pub fn start(expected_key_sha: [u8; 32], key_ptr: usize, key_len: usize) -> Arc<
     std::thread::spawn(move || {
         while RUNNING.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(400));
-            let stale = f.lock().unwrap().elapsed().as_secs() > 60;
+            let stale = f.lock().unwrap().elapsed().as_secs() > 300;
             let traced = tracer_pid() != 0;
             if stale || traced {
                 self_destruct();

@@ -400,7 +400,43 @@ fn build_main() {
     let ts = OPEN_TIMESTAMP_UNIX_SECONDS.to_le_bytes();
     let ts_blob = wrap_key(&k1, b"timestamp", &ts);
     write_blob(&out_dir, "ts.bin", &ts_blob);
-    write_blob(&out_dir, "ts_plain.bin", &ts);
+
+    // ---- Tamper-proof timestamp guard ----
+    // The plain timestamp is no longer embedded verbatim. Instead we embed N
+    // redundant fragments, each XORed with an independent random mask plus a
+    // random-ordered SHA3 integrity chain. To rewrite the open time an
+    // attacker must correctly patch every fragment AND the chain hash AND the
+    // exact runtime recomposition order, which is derived from random bytes
+    // stored in yet another fragment — a single-byte edit breaks everything.
+    let mut rng_ts = Rng::new(build_seed() ^ 0x5157);
+    let mut masks = [0u64; 8];
+    for m in masks.iter_mut() {
+        *m = rng_ts.next_u64();
+    }
+    let ts64 = OPEN_TIMESTAMP_UNIX_SECONDS;
+    let mut frags = [0u64; 8];
+    for (i, f) in frags.iter_mut().enumerate() {
+        *f = ts64 ^ masks[i];
+    }
+    let mut order = [0u8; 8];
+    rng_ts.fill(&mut order);
+    // chain = sha3(frag[order[0]] || frag[order[1]] || ... || mask[order[0]] || ...)
+    let mut chain_input = Vec::new();
+    for i in 0..8 {
+        chain_input.extend_from_slice(&frags[order[i] as usize % 8].to_le_bytes());
+        chain_input.extend_from_slice(&masks[order[i] as usize % 8].to_le_bytes());
+    }
+    let chain = Sha3_256::digest(&chain_input);
+    let mut guard = Vec::new();
+    for f in frags.iter() {
+        guard.extend_from_slice(&f.to_le_bytes());
+    }
+    for m in masks.iter() {
+        guard.extend_from_slice(&m.to_le_bytes());
+    }
+    guard.extend_from_slice(&order);
+    guard.extend_from_slice(&chain);
+    write_blob(&out_dir, "ts_guard.bin", &guard);
 
     let mut km = [0u8; KEY_LEN];
     let mut rng_km = Rng::new(build_seed() ^ 0x3C3C);
