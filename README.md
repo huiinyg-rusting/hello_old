@@ -1,5 +1,5 @@
 # hello_old
-
+## [video is here](https://github.com/huiinyg-rusting/hello_old/issues/1)  
 AI made
 它不是一把普通的钥匙，而是一座**七道城门嵌套、各自挂着不同锁**的城堡。盗贼必须依次撬开每一道门，任何一道门察觉到可疑的动静，整座城堡就会**当场自焚**，连同门里的秘密一起化为灰烬，连一页纸都不留下。
 
