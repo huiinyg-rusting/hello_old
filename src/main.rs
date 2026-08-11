@@ -231,6 +231,24 @@ fn xor6(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32], d: &[u8; 32], e: &[u8; 32], f:
     o
 }
 
+/// The real open timestamp is only ever referenced through an XOR mask so the
+/// plain value (2_755_000_000 / its LE bytes) never appears as an immediate
+/// constant in the binary. The mask is a fixed compile-time value, so this is
+/// anti-`strings`/anti-location hardening, not secrecy — matching the M4/M5
+/// obfuscation tier for the time-gate anchor.
+const TS_MASK: u64 = 0xA5A5_5A5A_0FF0_F00F;
+const OPEN_TS_ENC: u64 = shared::OPEN_TIMESTAMP_UNIX_SECONDS ^ TS_MASK;
+
+/// `black_box` keeps the mask opaque to the optimizer so `OPEN_TS_ENC ^ mask`
+/// is NOT constant-folded back into the plain (2_755_000_000) as an immediate;
+/// only the two masked halves ever appear in the binary. The function is not
+/// inlined so the fold cannot happen at a call site either.
+#[inline(never)]
+fn open_ts_ref() -> u64 {
+    let m = std::hint::black_box(TS_MASK);
+    OPEN_TS_ENC ^ m
+}
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let zz = z + 719468;
     let era = (if zz >= 0 { zz } else { zz - 146096 }) / 146097;
@@ -255,7 +273,7 @@ fn format_unix(ts: u64) -> String {
 }
 
 fn open_date_string() -> String {
-    let days = (shared::OPEN_TIMESTAMP_UNIX_SECONDS / 86400) as i64;
+    let days = (open_ts_ref() / 86400) as i64;
     let (y, mo, d) = civil_from_days(days);
     format!("{:04}-{:02}-{:02}", y, mo, d)
 }
@@ -319,7 +337,7 @@ fn parse_meta(meta: &[u8]) -> Vec<String> {
 }
 
 fn refuse(lines: &[String], feed: &dyn Fn()) -> ! {
-    let unlock_time = format_unix(shared::OPEN_TIMESTAMP_UNIX_SECONDS);
+    let unlock_time = format_unix(open_ts_ref());
     tui::show(lines, feed, &unlock_time, false);
     watchdog::stop();
     tui::show_cursor();
@@ -1043,7 +1061,7 @@ fn main() {
         arr.copy_from_slice(&blob[..8]);
         let ts = u64::from_le_bytes(arr);
         crypto::zeroize(blob.as_mut_slice());
-        if !crypto::ct_eq(&ts.to_le_bytes(), &shared::OPEN_TIMESTAMP_UNIX_SECONDS.to_le_bytes()) {
+        if !crypto::ct_eq(&ts.to_le_bytes(), &open_ts_ref().to_le_bytes()) {
             watchdog::self_destruct();
         }
         ts
@@ -1281,7 +1299,7 @@ fn main() {
     // here, briefly, then the rolling cipher is disarmed and the mask wiped.
     rolling::disarm();
     let revealed = unsafe { std::slice::from_raw_parts(content_buf.ptr, text.len()) };
-    let revealed = String::from_utf8_lossy(revealed).into_owned();
+    let mut revealed = String::from_utf8_lossy(revealed).into_owned();
     let mut all = report;
     for line in meta_lines {
         all.push(line);
@@ -1289,6 +1307,17 @@ fn main() {
     for line in revealed.lines() {
         all.push(line.to_string());
     }
+    // Wipe the owned copy now that every line has been copied into `all`.
+    unsafe {
+        let v = revealed.as_mut_vec();
+        for b in v.iter_mut() {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    drop(revealed);
+    // Re-encrypt the secure buffer: plaintext residency was limited to the copy
+    // above; from here on the buffer holds rotating ciphertext again until exit.
+    rolling::arm(content_buf.ptr, text.len());
 
     beat();
     let unlock_time = format_unix(open_ts);
@@ -1298,6 +1327,15 @@ fn main() {
         let height = tui::term_height();
         watchdog::stop();
         tui::burn_with_progress(width, height, &beat);
+        // Wipe the (masked) content in the secure buffer before locking it away.
+        rolling::disarm();
+        unsafe {
+            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text.len());
+            for x in b.iter_mut() {
+                std::ptr::write_volatile(x, 0);
+            }
+        }
+        crypto::flush_mem(content_buf.ptr, text.len());
         key_buf.lock_none();
         content_buf.lock_none();
 
@@ -1316,7 +1354,17 @@ fn main() {
             let _ = std::fs::remove_file(log);
         }
     } else {
-        // keep terminal stable after a wrong-letter cancel
+        // keep terminal stable after a wrong-letter cancel, but still wipe the
+        // decrypted content from the secure buffer before exiting.
+        rolling::disarm();
+        unsafe {
+            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text.len());
+            for x in b.iter_mut() {
+                std::ptr::write_volatile(x, 0);
+            }
+        }
+        crypto::flush_mem(content_buf.ptr, text.len());
+        content_buf.lock_none();
         tui::show_cursor();
         std::process::exit(0);
     }
