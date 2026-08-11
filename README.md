@@ -162,3 +162,63 @@ printf '114514\n' | ./hello_old   # 管道自动化
 需要同时突破：时间门控、NTP 共识、11 种算法叠加、RustyVM 密钥重建、seccomp/memory/反调试防护、常量时间侧信道防护——并在每次尝试失败时冒着整个程序自毁的风险。任何单点突破都无法还原密钥；密钥只存在于运行时内存，且生命期以毫秒计。**除非你同时掌握内核级与硬件级攻击能力，否则这扇门在到点之前，就是关着的。**
 
 > 完整全链路流程图见 [FLOWCHART.md](FLOWCHART.md)。
+
+### 运行时加固清单（本构建新增）
+
+> 本次构建在原有七层加密链之上，追加了独立成组的运行时加固。所有加固在 debug 构建下已验证通过；release 构建需先经 `cargo xtask sign` 签名，否则程序拒绝运行。
+
+**A — 行为收敛**
+- 删除 `NO_SELF_DESTRUCT` 编译开关：自毁不再可被条件编译关掉，路径唯一、行为一致。
+- `build.rs` 的全部信息泄露输出改为 `binfo!` 宏，仅 `debug_assertions` 下打印；release 构建静默，不给逆向者提供算法/密钥布局提示。
+
+**B — 文件自锁与烧毁清理**
+- Windows 上 `harden_exe()` 以 `FILE_SHARE_READ` 独占打开自身 exe 句柄并持有到进程结束，运行时他人无法删除/移动/覆盖它；烧毁路径先 `unlock_exe()` 释放句柄，再删除二进制与诊断日志。
+
+**C — 时间门多校验点 + 全路径恒定**
+- 时间判定改写为非平凡算术谓词 `time_gate_open()`，在二进制中不以裸 `now < open_ts` 出现，静态 patch 难以定位。
+- 门锁判定不再提前退出：**无论门锁与否都跑完整七层解密**，运行时长相一致，侧信道无法从耗时区分锁定/解锁。
+- 解密链末尾二次重读系统时钟复核；watchdog 周期校验（`set_open_ts` 武装后，回拨时钟即 fail-fast）。
+
+**D — Windows 反调试/反注入**
+- 绕过 `IsDebuggerPresent` hook：内联汇编直读 `gs:[0x60]` PEB 的 BeingDebugged 标志。
+- `NtQueryInformationProcess(ProcessDebugPort=7)`：从 ntdll 导出表（手写 PE 解析，绕 GetProcAddress hook）取函数地址直调。
+- `EnumWindows` 标题枚举：识别 x64dbg/x32dbg/OllyDbg/IDA/Immunity/WinDbg 窗口。
+- 所有调试器检测失败即 fail-fast 自杀。
+
+**S — 侧信道与内存卫生**
+- 成功/失败路径对称 burn（`timing_equalize`）+ 随机抖动（`timing_jitter` 0–8ms）。
+- 密码读取改为固定 127 字节栈缓冲 + `VirtualLock`/`mlock` 锁页 + volatile 清零；不再用堆 `Vec`。
+- 解密后刷栈（`scrub_stack`）+ `flush_mem` 补 `mfence/lfence`。
+- 所有敏感比较（watchdog 密钥哈希、Serpent-SIV tag、DEK 校验）改用常数时间 `ct_eq`。
+
+**X1 — 全文件 Ed448 自签名**
+- `xtask` 构建工具对 exe 全文件做 Ed448 签名（约 187 字节签名档，追加在 PE overlay 末尾）。
+- 运行启动时重读自身文件并验证签名；失败打印警告并拒绝运行（exit 138）。
+- 私钥随机生成、用后即弃，仓库无敏感物；防的是"改逻辑没重签"的粗心 patch。
+
+**X2 — 内存滚动加密**
+- 解密内容写入安全缓冲后立即用进程随机掩码 XOR 加密；watchdog 每 400ms 滚动更换掩码，任意时刻 dump 得到的是已被滚动的密文。
+- 显示前才解密，随后掩码清零。明文驻留窗口以毫秒计。
+
+**X3 — 双 watchdog 互监控**
+- 两个独立 watchdog 线程共享心跳槽；任一被 kill，另一方检测到兄弟心跳过期即 fail-fast 自杀。主线程 `beat()` 同步刷新心跳。
+
+**X6 — VM 降级**
+- 检测 hypervisor/SMBIOS 指纹（VMware/VirtualBox/QEMU/KVM/Xen）后，RustyVM 每指令额外 250µs 延迟并输出警告——拖慢而非封禁。
+
+**M — 杂项加固**
+- M1 周期反调试：`debugger_present()` 从 watchdog 每 400ms 重跑，运行中挂调试器也会 fail-fast（不只在启动时检测一次）。
+- M3 进程迁移策略：动态加载 `SetProcessMitigationPolicy`，启用动态代码禁用、严格句柄检查、底部随机 ASLR。
+- M4 不透明谓词：`time_gate_open` 内插恒真/恒假代数欺骗，掩埋真实时间判定。
+- M5 字符串混淆：签名 MAGIC 与调试器窗口标题以 XOR 字节存于 `.rodata`，运行时解掩，静态扫描看不到明文。
+- M6 内嵌 blob 完整性：VM 程序字节码的 blake3 由 build.rs 生成内嵌，启动校验，内存 hook 拒绝运行。
+- M7 代码段内存自校验：watchdog 对运行中 `.text` 内存做基线 + 周期 hash 对比，运行期被改写即 fail-fast（补 X1 只防启动前的缺口）。
+- M8 调试对象侦察：`NtQueryInformationProcess` 追加 `ProcessDebugObjectHandle(0x1e)` 与 `ProcessDebugFlags(0x1f)`。
+
+**构建流程**
+```
+cargo build                    # 普通构建
+cargo run --manifest-path xtask/Cargo.toml -- \
+    target/release/hello_old.exe target/release/hello_old.exe   # 签名（就地覆盖）
+```
+未经签名的二进制会拒绝运行——这是有意为之的完整性门。

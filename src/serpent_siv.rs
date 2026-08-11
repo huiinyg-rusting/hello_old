@@ -177,7 +177,8 @@ pub fn siv_decrypt(key32: &[u8], ad: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>
         i += take;
     }
     let v_check = s2v(k1, &[ad], &out);
-    if v_check != v {
+    use subtle::ConstantTimeEq;
+    if !bool::from(v_check.ct_eq(&v)) {
         return None;
     }
     Some(out)

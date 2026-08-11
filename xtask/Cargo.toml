@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ed448-goldilocks = "0.14.0-pre.15"
+
+[workspace]

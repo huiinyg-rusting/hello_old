@@ -38,6 +38,11 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Performance",
     "Win32_System_Time",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
 ] }
 
 [build-dependencies]
@@ -61,6 +66,7 @@ blake3 = "1.8"
 zeroize = "1.7"
 hmac = "0.12"
 rand_core = "0.10"
+subtle = "2.5"
 
 [profile.release]
 opt-level = "z"

@@ -101,6 +101,14 @@ pub fn flush_mem(ptr: *const u8, len: usize) {
             }
             a = a.saturating_add(LINE);
         }
+        // Order the CLFLUSHes and stop the store buffer from letting the
+        // sensitive lines linger after we report them gone (anti side-channel).
+        unsafe {
+            std::arch::x86_64::_mm_mfence();
+        }
+        unsafe {
+            std::arch::x86_64::_mm_lfence();
+        }
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     }
     #[cfg(not(target_arch = "x86_64"))]

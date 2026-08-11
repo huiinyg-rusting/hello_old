@@ -23,6 +23,19 @@ use siv_mod::{siv_encrypt as siv_encrypt_inner};
 
 include!("shared.rs");
 
+/// Build-time info banner: only shown for debug builds. Release builds keep
+/// the binary blobs, hashes, lengths and KEK samples out of the build log so
+/// nothing about the sealed payload leaks through stdout.
+#[cfg(debug_assertions)]
+macro_rules! binfo {
+    ($($arg:tt)*) => { println!("cargo:warning={}", format!($($arg)*)) };
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! binfo {
+    ($($arg:tt)*) => {};
+}
+
 const DEFAULT_PASSWORD: &[u8] = PASSWORD;
 const H1: usize = KEY_LEN / 2;
 const ARGON2_MEMORY_KIB: u32 = 65536;
@@ -335,10 +348,11 @@ fn build_main() {
 
     let content = fs::read("read.txt").expect("read.txt missing at package root");
     // Print the head of the secret so builders can see what the char count maps to.
+    #[cfg(debug_assertions)]
     {
         let head: String = String::from_utf8_lossy(&content[..content.len().min(120)]).into_owned();
         let head = head.replace('\n', " \\n ");
-        println!("cargo:warning=read.txt head ({} chars): {}", content.len(), head);
+        binfo!("read.txt head ({} chars): {}", content.len(), head);
     }
     // Gather file metadata
     let meta = fs::metadata("read.txt").expect("metadata missing");
@@ -359,16 +373,19 @@ fn build_main() {
     payload.extend_from_slice(&meta_len.to_le_bytes());
     payload.extend_from_slice(meta_bytes);
     payload.extend_from_slice(&content);
-    // Simulate encryption progress bar
-    let total_steps = 10;
-    for step in 0..=total_steps {
-        let percent = step * 100 / total_steps;
-        let bar = "#".repeat(step as usize);
-        print!("\rEncrypting payload: [{:<10}] {}%", bar, percent);
-        std::io::stdout().flush().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // Simulate encryption progress bar (debug builds only; release stays silent)
+    #[cfg(debug_assertions)]
+    {
+        let total_steps = 10;
+        for step in 0..=total_steps {
+            let percent = step * 100 / total_steps;
+            let bar = "#".repeat(step as usize);
+            print!("\rEncrypting payload: [{:<10}] {}%", bar, percent);
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!();
     }
-    println!();
 
     // Generate k1 and k2 first (needed for payload encryption)
     let mut k1 = [0u8; 32];
@@ -447,6 +464,10 @@ fn build_main() {
 
     let prog_blob = wrap_key(&bk, b"vmprog", &prog);
     write_blob(&out_dir, "vmprog.bin", &prog_blob);
+    // M6: integrity anchor for the VM program — the blake3 of the *encrypted*
+    // blob is embedded so a runtime memory patch of the VM bytecode is caught
+    // by the startup check in main.
+    write_blob(&out_dir, "vmprog_hash.bin", &blake3_256(&prog_blob));
     write_blob(&out_dir, "km.bin", &km);
     write_blob(&out_dir, "salt.bin", &salt);
     zeroize(&mut master_key);
@@ -462,13 +483,13 @@ fn build_main() {
     let mut dilithium_wrap_key = wrapping_keys[4];
     let mut serpent_dek_wrap_key = wrapping_keys[5];
 
-    println!("cargo:warning===== BUILD INFO ====");
-    println!("cargo:warning=Plaintext chars: {}", content.len());
-    println!("cargo:warning=Plaintext SHA-3-256: {}", hex(&plaintext_hash));
-    println!(
-        "cargo:warning=Algorithms: Argon2id + RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344 + CRYSTALS-Dilithium-5 + Serpent-256-SIV + Ed448ph + SM3 + BLAKE3 + Seccomp-BPF"
+    binfo!("===== BUILD INFO ====");
+    binfo!("Plaintext chars: {}", content.len());
+    binfo!("Plaintext SHA-3-256: {}", hex(&plaintext_hash));
+    binfo!(
+        "Algorithms: Argon2id + RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344 + CRYSTALS-Dilithium-5 + Serpent-256-SIV + Ed448ph + SM3 + BLAKE3 + Seccomp-BPF"
     );
-    println!("cargo:warning=KDF/KEK (Argon2id->RustyVM): {:02x?}", &kek[..8]);
+    binfo!("KDF/KEK (Argon2id->RustyVM): {:02x?}", &kek[..8]);
     zeroize(&mut kek);
 
     // ---- [Algorithm 2] RSA-4096: generate keypair, wrap a shared shard ----
@@ -488,7 +509,7 @@ fn build_main() {
         .encrypt(&mut rng, oaep, &s_rsa)
         .expect("rsa oaep encrypt");
     write_blob(&out_dir, "ct_rsa.bin", &ct_rsa);
-    println!("cargo:warning=RSA-4096: ct={} der={} bits=4096", ct_rsa.len(), rsa_der.len());
+    binfo!("RSA-4096: ct={} der={} bits=4096", ct_rsa.len(), rsa_der.len());
 
     // ---- [Algorithm 3] Kyber-1024: keypair + encapsulation ----
     let dk_ky = DecapsulationKey::<MlKem1024>::generate();
@@ -499,8 +520,8 @@ fn build_main() {
     write_blob(&out_dir, "ct_ky.bin", ct_ky.as_slice());
     let mut s_ky = [0u8; 32];
     s_ky.copy_from_slice(sh_ky.as_slice());
-    println!(
-        "cargo:warning=Kyber-1024: ct={} shard recovered",
+    binfo!(
+        "Kyber-1024: ct={} shard recovered",
         ct_ky.as_slice().len()
     );
 
@@ -518,8 +539,8 @@ fn build_main() {
     write_blob(&out_dir, "ct_mce.bin", &ct_mce_arr);
     let mut s_mce = [0u8; 32];
     s_mce.copy_from_slice(sh_mce.as_array());
-    println!(
-        "cargo:warning=McEliece-6960119f: pubkey={} sk={} ct={} shard recovered",
+    binfo!(
+        "McEliece-6960119f: pubkey={} sk={} ct={} shard recovered",
         pub_mce.as_ref().len(),
         sk_mce_bytes.len(),
         ct_mce.as_array().len()
@@ -550,8 +571,8 @@ fn build_main() {
         &wrap_key(&frodokem_wrap_key, b"frodo-sk", &frodokem_sk_bytes),
     );
     write_blob(&out_dir, "ct_frodo.bin", ct_frodo.as_ref());
-    println!(
-        "cargo:warning=FrodoKEM-1344: ct={} shard recovered",
+    binfo!(
+        "FrodoKEM-1344: ct={} shard recovered",
         ct_frodo.as_ref().len()
     );
     
@@ -574,8 +595,8 @@ fn build_main() {
     // VK is bound by two independent hash primitives (BLAKE3 + SM3). The byte
     // slice here is identical to what main.rs uses, keeping DEK recovery round-trip valid.
     let s_sm3 = sm3_256(dilithium_vk.to_bytes().as_slice());
-    println!(
-        "cargo:warning=CRYSTALS-Dilithium-5 (ML-DSA-87): vk={} sk wrapped",
+    binfo!(
+        "CRYSTALS-Dilithium-5 (ML-DSA-87): vk={} sk wrapped",
         dilithium_vk.to_bytes().as_slice().len()
     );
 
@@ -617,15 +638,13 @@ fn build_main() {
     msg.extend_from_slice(&sha256(&siv_blob));
     let sig: Signature = ed_sk.sign_raw(&msg);
     write_blob(&out_dir, "ed_sig.bin", sig.to_bytes().as_ref());
-    println!(
-        "cargo:warning=Ed448: vk=57B sig=114B over (ts|dek|sha256(siv)) signed",
-    );
+    binfo!("Ed448: vk=57B sig=114B over (ts|dek|sha256(siv)) signed");
 
     // ---- [Algorithm 9] CRYSTALS-Dilithium-5: sign the binding message ----
     let dilithium_sig = dilithium_keypair.sign(&msg, None, RandomMode::Hedged).expect("Dilithium sign");
     write_blob(&out_dir, "dilithium_sig.bin", &dilithium_sig);
-    println!(
-        "cargo:warning=CRYSTALS-Dilithium-5: sig={} over (ts|dek|sha256(siv)) signed",
+    binfo!(
+        "CRYSTALS-Dilithium-5: sig={} over (ts|dek|sha256(siv)) signed",
         dilithium_sig.len()
     );
 
@@ -641,10 +660,10 @@ fn build_main() {
     // Dilithium
     // dilithium_sk_wrap.bin, dilithium_vk.bin, dilithium_sig.bin already written
 
-    println!("cargo:warning=Serpent-256-SIV: blob={} (V(16) || ct)", siv_blob.len());
-    println!("cargo:warning=DEK shards XOR combined (32B) = {:02x?}", &dek[..8]);
-    println!("cargo:warning=Message signed (timestamp+DEK+hash) with Ed448 + Dilithium-5");
-    println!("cargo:warning====================");
+    binfo!("Serpent-256-SIV: blob={} (V(16) || ct)", siv_blob.len());
+    binfo!("DEK shards XOR combined (32B) = {:02x?}", &dek[..8]);
+    binfo!("Message signed (timestamp+DEK+hash) with Ed448 + Dilithium-5");
+    binfo!("====================");
 
     // Sensitive material cleanup.
     zeroize(&mut s_rsa);

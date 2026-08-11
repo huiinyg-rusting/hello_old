@@ -5,6 +5,7 @@ mod crypto;
 mod harden;
 mod ntp;
 mod pass;
+mod rolling;
 mod rustyvm;
 mod seccomp;
 mod signal;
@@ -35,6 +36,7 @@ const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin"));
 const TS_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts.bin"));
 const TS_GUARD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts_guard.bin"));
 const VM_PROG_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmprog.bin"));
+const VM_PROG_HASH: &[u8; 32] = include_bytes!(concat!(env!("OUT_DIR"), "/vmprog_hash.bin"));
 const KM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/km.bin"));
 const SALT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/salt.bin"));
 
@@ -258,6 +260,32 @@ fn open_date_string() -> String {
     format!("{:04}-{:02}-{:02}", y, mo, d)
 }
 
+/// Constant-equivalent check: `now >= open_ts`. Written as a few arithmetic
+/// rewrites that are algebraically equivalent to the plain comparison but do
+/// not appear as a bare `now < open_ts` in the binary, so a static patch is
+/// harder to target. No secret-indexed access and no secret-dependent branch.
+///
+/// The opaque predicates below are algebraically always-true/false idioms
+/// (M4). Each reduces to the identity, so they never change the result, but
+/// they bury the real gate under arithmetic that a toolchain / analyst must
+/// evaluate to notice it is dead code.
+fn time_gate_open(now: u64, open_ts: u64) -> bool {
+    // now >= open_ts  <=>  (now - open_ts) does not wrap to a huge value
+    // i.e. now.wrapping_sub(open_ts) as i64 is >= 0.
+    let gate = (now.wrapping_sub(open_ts) as i64) >= 0;
+
+    // M4 opaque predicates: always-true / always-false arithmetic idioms.
+    // x^2 - 6x + 9 == (x-3)^2 >= 0; evaluating on a stolen constant yields 0
+    // either way so the following branch is provably dead but not obviously.
+    let x = (now.wrapping_sub(now) & 0xffff) as u64; // 0
+    let always_zero = x.wrapping_mul(x).wrapping_sub(6u64.wrapping_mul(x)).wrapping_add(9); // 9
+    let dead_branch = always_zero == 0; // false
+    if dead_branch {
+        return !gate;
+    }
+    gate
+}
+
 /// Parse the embedded metadata JSON `{"created":..,"modified":..,"author":".."}`
 /// into human-readable display lines.
 fn parse_meta(meta: &[u8]) -> Vec<String> {
@@ -292,7 +320,7 @@ fn parse_meta(meta: &[u8]) -> Vec<String> {
 
 fn refuse(lines: &[String], feed: &dyn Fn()) -> ! {
     let unlock_time = format_unix(shared::OPEN_TIMESTAMP_UNIX_SECONDS);
-    tui::show(lines, feed, &unlock_time);
+    tui::show(lines, feed, &unlock_time, false);
     watchdog::stop();
     tui::show_cursor();
     std::process::exit(1);
@@ -380,14 +408,197 @@ fn timing_equalize() {
     crypto::zeroize(&mut scratch);
 }
 
-fn anti_debug_checks() -> bool {
-    if watchdog::tracer_pid() != 0 {
+/// Random micro-delay (0..8ms) applied to both success and failure paths so
+/// any residual timing difference that a jitter-free equalizer missed is
+/// buried in noise. Uses OS entropy so the delay is not predictable.
+fn timing_jitter() {
+    use std::time::Duration;
+    let mut b = [0u8; 2];
+    if getrandom::getrandom(&mut b).is_ok() {
+        let ms = u16::from_le_bytes(b) % 9;
+        std::thread::sleep(Duration::from_millis(ms as u64));
+    }
+}
+
+/// Resolve an ntdll export address without GetProcAddress so a hooked
+/// GetProcAddress cannot hide the function. We walk the PE export table of
+/// the mapped ntdll module directly.
+#[cfg(target_os = "windows")]
+fn get_ntdll_proc(name: &str) -> Option<*const std::ffi::c_void> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    unsafe {
+        let wide: Vec<u16> = std::ffi::OsStr::new("ntdll.dll")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let m = GetModuleHandleW(wide.as_ptr());
+        if m.is_null() {
+            return None;
+        }
+        let base = m as usize;
+        let pe_off = *((base as *const u8).add(0x3c) as *const u32);
+        let pe = (base + pe_off as usize) as *const u8;
+        // IMAGE_NT_HEADERS: Signature(4) + FileHeader(20) + OptionalHeader.
+        // Export dir is DataDirectory[0] of the PE32+ optional header, which
+        // begins at optional header offset 0x70 (RVA + Size, two u32s).
+        let exp_rva_off = 4 + 20 + 0x70;
+        let export_rva = *((pe.add(exp_rva_off)) as *const u32);
+        let export_size = *((pe.add(exp_rva_off + 4)) as *const u32);
+        if export_rva == 0 || export_rva as usize + export_size as usize > 0x1000_0000 {
+            return None;
+        }
+        let exp = (base + export_rva as usize) as *const u8;
+        let names_cnt = *((exp.add(0x18)) as *const u32) as usize;
+        let funcs_rva = *((exp.add(0x1c)) as *const u32) as usize;
+        let names_rva = *((exp.add(0x20)) as *const u32) as usize;
+        let ords_rva = *((exp.add(0x24)) as *const u32) as usize;
+        let names_arr = (base + names_rva) as *const u32;
+        let funcs_arr = (base + funcs_rva) as *const u32;
+        let ords_arr = (base + ords_rva) as *const u16;
+        for i in 0..names_cnt {
+            let name_rva = *names_arr.add(i) as usize;
+            let n = (base + name_rva) as *const u8;
+            let mut k = 0usize;
+            while *n.add(k) != 0 && k < 128 {
+                k += 1;
+            }
+            let s = std::slice::from_raw_parts(n, k);
+            if s == name.as_bytes() {
+                let ord = *ords_arr.add(i) as usize;
+                let f = *funcs_arr.add(ord);
+                return Some((base + f as usize) as *const std::ffi::c_void);
+            }
+        }
+        None
+    }
+}
+
+/// Enumerate visible top-level windows and flag common GUI debuggers by
+/// title substring. Cheap and very noisy to false-positive on, so only the
+/// most distinctive known titles are matched.
+/// M5: debugger window titles stored as XOR-masked byte slices; unmasked at
+/// runtime so the match list is not present as plaintext strings in the binary.
+#[cfg(target_os = "windows")]
+fn xor_patterns() -> Vec<String> {
+    const X: u8 = 0x0d;
+    // (title ^ X) for each known debugger window-title substring.
+    const RAW: &[&[u8]] = &[
+        &[b'x' ^ X, b'6' ^ X, b'4' ^ X, b'd' ^ X, b'b' ^ X, b'g' ^ X],
+        &[b'x' ^ X, b'3' ^ X, b'2' ^ X, b'd' ^ X, b'b' ^ X, b'g' ^ X],
+        &[b'O' ^ X, b'l' ^ X, b'l' ^ X, b'y' ^ X, b'D' ^ X, b'b' ^ X, b'g' ^ X],
+        &[b'I' ^ X, b'D' ^ X, b'A' ^ X, b' ' ^ X, b'-' ^ X, b' ' ^ X],
+        &[
+            b'I' ^ X, b'm' ^ X, b'm' ^ X, b'u' ^ X, b'n' ^ X, b'i' ^ X, b't' ^ X,
+            b'y' ^ X, b' ' ^ X, b'D' ^ X, b'e' ^ X, b'b' ^ X, b'u' ^ X, b'g' ^ X,
+            b'g' ^ X, b'e' ^ X, b'r' ^ X,
+        ],
+        &[b'W' ^ X, b'i' ^ X, b'n' ^ X, b'D' ^ X, b'b' ^ X, b'g' ^ X],
+    ];
+    RAW.iter()
+        .map(|row| row.iter().map(|&b| (b ^ X) as char).collect())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn window_debugger_present() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, IsWindowVisible,
+    };
+    unsafe extern "system" fn cb(
+        h: windows_sys::Win32::Foundation::HWND,
+        lparam: windows_sys::Win32::Foundation::LPARAM,
+    ) -> i32 {
+        let flag = lparam as *mut bool;
+        if IsWindowVisible(h) != 0 {
+            let mut buf = [0u16; 128];
+            let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
+            if n > 0 {
+                let s = String::from_utf16_lossy(&buf[..n as usize]);
+                // M5: debugger titles are stored XORed (^ 0x0d) so a static
+                // scan of the binary does not reveal the match list.
+                for pat in xor_patterns() {
+                    if s.contains(pat.as_str()) {
+                        *flag = true;
+                        return 0;
+                    }
+                }
+            }
+        }
+        1
+    }
+    let mut flag = false;
+    unsafe {
+        EnumWindows(Some(cb), &mut flag as *mut bool as isize);
+    }
+    flag
+}
+
+/// M5: runtime-unmask a small constant string. The stored bytes are XORed with
+/// a fixed 0x5a so a static scan of the binary does not immediately show
+/// sensitive literals (signature magic, debugger window titles).
+fn xor_unmask<const N: usize>(xored: &[u8; N]) -> [u8; N] {
+    let mut out = [0u8; N];
+    for i in 0..N {
+        out[i] = xored[i] ^ 0x5a;
+    }
+    out
+}
+
+/// M6: verify the embedded VM program blob matches its build-time hash. A
+/// runtime memory patch of the VM bytecode (which would otherwise silently
+/// change the key-rebuilding VM) is answered with a refusal to run.
+fn verify_blob_integrity() -> bool {
+    let actual = blake3::hash(VM_PROG_BLOB);
+    crypto::ct_eq(actual.as_bytes(), VM_PROG_HASH)
+}
+
+/// Full-file Ed448 self-signature check. The build pipeline (cargo xtask sign)
+/// appends a signature block to the PE overlay: magic(8) | covered_len(u64) |
+/// verifying_key(57) | signature(114). `covered` is the number of leading bytes
+/// that were signed. At runtime we re-read the running exe, locate the trailing
+/// block, and verify [0..covered) with the embedded key.
+fn verify_self_signature() -> bool {
+    const MAGIC_X: &[u8; 8] = &[
+        b'H' ^ 0x5a, b'L' ^ 0x5a, b'D' ^ 0x5a, b'L' ^ 0x5a,
+        b'S' ^ 0x5a, b'I' ^ 0x5a, b'G' ^ 0x5a, b'1' ^ 0x5a,
+    ];
+    let magic = xor_unmask(MAGIC_X); // -> "HLDLSIG1"
+    let data = match std::env::current_exe().and_then(|p| std::fs::read(p)) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if data.len() < 8 + 8 + 57 + 114 {
         return false;
     }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        if libc::prctl(libc::PR_SET_PTRACER, 0, 0, 0, 0) == -1 {
-        }
+    let block_off = data.len() - (8 + 8 + 57 + 114);
+    if &data[block_off..block_off + 8] != &magic {
+        return false;
+    }
+    let mut covered = [0u8; 8];
+    covered.copy_from_slice(&data[block_off + 8..block_off + 16]);
+    let covered = u64::from_le_bytes(covered) as usize;
+    if covered > block_off {
+        return false;
+    }
+    let mut vk_bytes = [0u8; 57];
+    vk_bytes.copy_from_slice(&data[block_off + 16..block_off + 16 + 57]);
+    let Ok(vk) = ed448_goldilocks::VerifyingKey::from_bytes(&vk_bytes) else {
+        return false;
+    };
+    let sig_bytes = &data[block_off + 16 + 57..block_off + 16 + 57 + 114];
+    let sig = ed448_goldilocks::Signature::from_bytes(
+        sig_bytes.try_into().expect("sig len"),
+    );
+    vk.verify_raw(&sig, &data[..covered]).is_ok()
+}
+
+/// Lightweight debugger-presence probe shared by startup and the watchdog.
+/// No timing measurement (the watchdog runs it on its own thread where a
+/// scheduling hiccup would false-trigger), no process-wide side effects.
+pub(crate) fn debugger_present() -> bool {
+    if watchdog::tracer_pid() != 0 {
+        return true;
     }
     #[cfg(target_os = "windows")]
     {
@@ -396,15 +607,89 @@ fn anti_debug_checks() -> bool {
         };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         if unsafe { IsDebuggerPresent() } != 0 {
-            return false;
+            return true;
+        }
+        // Bypass any IsDebuggerPresent hook by reading the PEB flag directly.
+        // gs:0x60 on x64 points at the PEB; BeingDebugged is at PEB+2.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let peb: *const u8;
+            std::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
+            let bd = *peb.add(2);
+            if bd != 0 {
+                return true;
+            }
         }
         let mut present: i32 = 0;
         unsafe {
             CheckRemoteDebuggerPresent(GetCurrentProcess(), &mut present);
         }
         if present != 0 {
-            return false;
+            return true;
         }
+        // NtQueryInformationProcess probes: ProcessDebugPort (7),
+        // ProcessDebugObjectHandle (0x1e), ProcessDebugFlags (0x1f).
+        unsafe {
+            type NtQueryInformationProcess = unsafe extern "system" fn(
+                windows_sys::Win32::Foundation::HANDLE,
+                u32,
+                *mut std::ffi::c_void,
+                u32,
+                *mut u32,
+            ) -> i32;
+            if let Some(ntqi) = get_ntdll_proc("NtQueryInformationProcess") {
+                let f: NtQueryInformationProcess = std::mem::transmute(ntqi);
+                // ProcessDebugPort
+                let mut debug_port: usize = 0;
+                let mut ret = 0u32;
+                let st = f(GetCurrentProcess(), 7, &mut debug_port as *mut _ as *mut _, 8, &mut ret);
+                if st == 0 && debug_port != 0 {
+                    return true;
+                }
+                // ProcessDebugObjectHandle
+                let mut obj_handle: *mut std::ffi::c_void = std::ptr::null_mut();
+                ret = 0;
+                let st_obj = f(
+                    GetCurrentProcess(),
+                    0x1e,
+                    &mut obj_handle as *mut _ as *mut _,
+                    std::mem::size_of::<*mut std::ffi::c_void>() as u32,
+                    &mut ret,
+                );
+                if st_obj == 0 && !obj_handle.is_null() {
+                    return true;
+                }
+                // ProcessDebugFlags: 0 when debugged, nonzero when not.
+                let mut no_debug = 0u32;
+                ret = 0;
+                let st_fl = f(
+                    GetCurrentProcess(),
+                    0x1f,
+                    &mut no_debug as *mut _ as *mut _,
+                    4,
+                    &mut ret,
+                );
+                if st_fl == 0 && no_debug == 0 {
+                    return true;
+                }
+            }
+        }
+        // Flag the common GUI debuggers by enumerating visible top-level
+        // windows and matching their titles.
+        if window_debugger_present() {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn anti_debug_checks() -> bool {
+    if debugger_present() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let _ = libc::prctl(libc::PR_SET_PTRACER, 0, 0, 0, 0);
     }
 
     let start = Instant::now();
@@ -479,6 +764,24 @@ fn main() {
         std::process::exit(137);
     }
 
+    if !verify_self_signature() {
+        eprintln!(
+            "\nWARNING: executable integrity check failed.\n\
+             This build is not signed or has been modified.\n\
+             Refusing to run.\n"
+        );
+        std::process::exit(138);
+    }
+
+    if !verify_blob_integrity() {
+        eprintln!(
+            "\nWARNING: embedded VM program integrity check failed.\n\
+             This build has been tampered with.\n\
+             Refusing to run.\n"
+        );
+        std::process::exit(139);
+    }
+
     signal::ignore();
     #[cfg(target_os = "linux")]
     unsafe {
@@ -486,10 +789,21 @@ fn main() {
         libc::prctl(0x59616d61, 0, 0, 0, 0);
     }
 
+    // M3: raise process mitigation policies (dynamic-code, strict-handle, ASLR).
+    harden::raise_process_mitigations();
+
     if !harden::check_injection() {
         refuse(
             &["INJECTION DETECTED".to_string(), "Access denied".to_string()],
             &noop,
+        );
+    }
+
+    // X6: degrade (slow + warn) under a virtualized environment.
+    if harden::vm_detected() {
+        rustyvm::set_vm_slow(true);
+        eprintln!(
+            "WARNING: virtualized environment detected — degraded mode (slowed) in effect."
         );
     }
 
@@ -546,6 +860,11 @@ fn main() {
         match crypto::decrypt(&bk, VM_PROG_BLOB) {
             Some(p) => {
                 zeroize(&mut bk);
+                // Symmetric timing: the success path burns the same cycles as
+                // the failure path so a correct password cannot be identified
+                // by how much faster it returned.
+                timing_equalize();
+                timing_jitter();
                 prog = p;
                 break;
             }
@@ -557,6 +876,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 timing_equalize();
+                timing_jitter();
                 tui::dynamic_center_error("Invalid password, try again", &noop);
             }
         }
@@ -599,9 +919,12 @@ fn main() {
     let feed: Arc<Mutex<Instant>> = watchdog::start(key_sha, key_buf.ptr as usize, 64);
     #[cfg(target_os = "windows")]
     watchdog::prevent_termination();
+    #[cfg(target_os = "windows")]
+    watchdog::harden_exe();
     key_buf.lock_ro();
     let beat = || {
         *feed.lock().unwrap() = Instant::now();
+        watchdog::beat_main();
     };
     beat();
     fx.draw(0.25, &beat);
@@ -725,6 +1048,8 @@ fn main() {
         }
         ts
     };
+    // Arm the watchdog time gate now that the real opening timestamp is known.
+    watchdog::set_open_ts(open_ts);
 
     {
         if !ts_guard_valid(open_ts) {
@@ -733,14 +1058,12 @@ fn main() {
     }
 
     let now_u64 = ntp_now.floor() as u64;
-    if now_u64 < open_ts {
-        let mut lines = report.clone();
-        lines.push("DOOR IS LOCKED".to_string());
-        lines.push(format!("Opens at     {}", format_unix(open_ts)));
-        lines.push(format!("Time left    {} seconds", open_ts - now_u64));
-        lines.push("Time has not yet arrived".to_string());
-        refuse(&lines, &beat);
-    }
+    // First gate check. We do NOT bail here: the whole 7-layer decryption runs
+    // regardless of whether the door is open, so an observer cannot tell from
+    // runtime length / power / cache trace whether the door is locked. The
+    // final verdict is applied only at reveal time (and re-verified after the
+    // full decryption chain).
+    let locked = !time_gate_open(now_u64, open_ts);
     for i in 0..4 {
         fx.draw(0.55 + i as f32 * 0.1, &beat);
         tui::sleep(50);
@@ -755,6 +1078,9 @@ fn main() {
     
     // Derive 6 independent wrapping keys from master key (k1||k2)
     let mut wrapping_keys = crypto::derive_wrapping_keys(&k1);
+    // k1/k2 are spent: wipe them from the stack immediately.
+    zeroize(&mut k1);
+    zeroize(&mut k2);
     let mut rsa_wrap_key = wrapping_keys[0];
     let mut kyber_wrap_key = wrapping_keys[1];
     let mut mceliece_wrap_key = wrapping_keys[2];
@@ -929,12 +1255,31 @@ fn main() {
     }
     crypto::flush_mem(content_buf.ptr, text.len());
     crypto::zeroize(content.as_mut_slice());
+    scrub_stack();
+    // X2: keep the decrypted content ciphertext-at-rest in the secure buffer;
+    // the mask is rotated by the watchdog until we are ready to display.
+    rolling::arm(content_buf.ptr, text.len());
 
     fx.finish(&beat);
+
+    // Second gate check: re-read the wall clock after the full decryption
+    // chain so a system clock jump made mid-decrypt cannot slip past. If the
+    // door is locked we still ran every layer above, so this branch does not
+    // leak the door state through runtime length.
+    if locked || !time_gate_open(ntp::unix_now_u64(), open_ts) {
+        let mut lines = report.clone();
+        lines.push("DOOR IS LOCKED".to_string());
+        lines.push(format!("Opens at     {}", format_unix(open_ts)));
+        lines.push("Time has not yet arrived".to_string());
+        refuse(&lines, &beat);
+    }
 
     // Success sequence and display
     success_sequence(&beat);
 
+    // X2: decrypt the content back for display. The plaintext is exposed only
+    // here, briefly, then the rolling cipher is disarmed and the mask wiped.
+    rolling::disarm();
     let revealed = unsafe { std::slice::from_raw_parts(content_buf.ptr, text.len()) };
     let revealed = String::from_utf8_lossy(revealed).into_owned();
     let mut all = report;
@@ -947,7 +1292,7 @@ fn main() {
 
     beat();
     let unlock_time = format_unix(open_ts);
-    let burn = tui::show(&all, &beat, &unlock_time);
+    let burn = tui::show(&all, &beat, &unlock_time, true);
     if burn {
         let width = tui::term_width();
         let height = tui::term_height();
@@ -959,10 +1304,16 @@ fn main() {
         // Zeroize content before exit
         crypto::zeroize(content.as_mut_slice());
 
-        if std::env::var("NO_SELF_DESTRUCT").is_err() {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::fs::remove_file(exe);
-            }
+        // The user confirmed the burn: release the exe lock first, then remove
+        // the binary and the diagnostic log we may have written during this run.
+        watchdog::unlock_exe();
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::fs::remove_file(exe);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let log = std::env::temp_dir().join("hello_old_destruct.log");
+            let _ = std::fs::remove_file(log);
         }
     } else {
         // keep terminal stable after a wrong-letter cancel
@@ -973,6 +1324,20 @@ fn main() {
 
 fn zeroize(buf: &mut [u8]) {
     crypto::zeroize(buf);
+}
+
+/// Wipe a large volatile stack region so secret intermediates (shard arrays,
+/// derived keys) that a compiler keeps in stack slots do not survive into the
+/// next frame where a different code path could read them.
+fn scrub_stack() {
+    let mut page = [0u8; 4096];
+    for b in page.iter_mut() {
+        unsafe {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    crypto::zeroize(&mut page);
 }
 
 use tui::{C_RESET, C_CYAN, C_GREEN, C_RED, C_YELLOW, C_BRIGHT_WHITE};

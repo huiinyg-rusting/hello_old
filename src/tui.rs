@@ -304,7 +304,7 @@ fn draw_progress_bars_all(width: usize, height: usize, measures: &[(&str, f32)],
     feed();
 }
 
-pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> bool {
+pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str, allow_burn: bool) -> bool {
     hide_cursor();
     let width = term_width();
     let height = term_height();
@@ -360,7 +360,13 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> bool {
     }
 
     loop {
-        let hint = if pages.len() <= 1 {
+        let hint = if !allow_burn {
+            if pages.len() <= 1 {
+                "  ▸ 按 q 退出  "
+            } else {
+                "  ▸ 按 空格/Enter 翻页  ·  p 返回上一页  ·  q 退出  "
+            }
+        } else if pages.len() <= 1 {
             "  ▸ 按 q 退出并烧毁  "
         } else {
             "  ▸ 按 空格/Enter 翻页  ·  p 返回上一页  ·  q 烧毁  "
@@ -389,6 +395,10 @@ pub fn show(lines: &[String], feed: &dyn Fn(), unlock_time: &str) -> bool {
                 }
             }
             Nav::Burn => {
+                if !allow_burn {
+                    // Door not yet open: q just exits, never self-destructs.
+                    return false;
+                }
                 let mut rng = Rng::new();
                 let target = char::from(b'A' + (rng.next_u64() % 26) as u8);
                 let ok = confirm_dialog(width, height, feed, target);

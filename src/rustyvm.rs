@@ -21,6 +21,23 @@ const OP_CF_OBFUSCATE_BASE: u8 = 0xA0;
 const OP_CF_OBFUSCATE_END: u8 = 0xA5;
 const OP_OPAQUE_LABEL: u8 = 0xF0;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// X6: when set, the VM interpreter runs with an extra per-op delay so dynamic
+/// analysis under an emulator / hypervisor is noticeably slower. It is
+/// informational degradation, never a hard block.
+static VM_SLOW: AtomicBool = AtomicBool::new(false);
+
+pub fn set_vm_slow(on: bool) {
+    VM_SLOW.store(on, Ordering::SeqCst);
+}
+
+fn vm_slow_sleep() {
+    if VM_SLOW.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_micros(250));
+    }
+}
+
 // Side-channel resistant: constant-time conditional select
 fn ct_select(cond: bool, a: u64, b: u64) -> u64 {
     let mask = (cond as u64).wrapping_neg();
@@ -289,6 +306,9 @@ pub fn run(prog: &[u8], material: &[u8], out: &mut [u8]) -> bool {
         // Stack overflow check
         let overflow = (sp >= 16) as u64;
         ok &= overflow == 0;
+
+        // X6: VM degradation — extra delay per instruction under a hypervisor.
+        vm_slow_sleep();
     }
 
     ok
