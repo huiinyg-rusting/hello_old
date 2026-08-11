@@ -110,6 +110,27 @@ fn blake3_256(data: &[u8]) -> [u8; 32] {
     *hash.as_bytes()
 }
 
+/// Counter-mode keystream seeded from k1||k2 (blake3). Both build.rs and
+/// main.rs derive identical streams so the reveal can un-whiten the payload.
+fn blake3_keystream(k1: &[u8; 32], k2: &[u8; 32], len: usize) -> Vec<u8> {
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(k1);
+    seed.extend_from_slice(k2);
+    let seed = blake3::hash(&seed);
+    let mut out = Vec::with_capacity(len);
+    let mut ctr: u64 = 0;
+    while out.len() < len {
+        let mut h = blake3::Hasher::new();
+        h.update(seed.as_bytes());
+        h.update(&ctr.to_le_bytes());
+        let block = h.finalize();
+        out.extend_from_slice(block.as_bytes());
+        ctr += 1;
+    }
+    out.truncate(len);
+    out
+}
+
 fn nonce_for(key: &[u8; 32], label: &[u8]) -> [u8; 12] {
     let mut h = Sha3_256::new();
     h.update(key);
@@ -395,17 +416,12 @@ fn build_main() {
     let mut rng_k2 = Rng::new(build_seed() ^ 0x5A5A);
     rng_k2.fill(&mut k2);
 
-    // Double-wrap the payload for runtime: k1 then k2
-    let mut inner = wrap_key(&k1, b"inner", &payload);
-    let mut double_wrapped = wrap_key(&k2, b"payload", &inner);
-
     let plaintext_hash = sha3_256(&payload);
-    // Write the encrypted payload with metadata to output
-    write_blob(&out_dir, "payload.bin", &double_wrapped);
-    // Zeroize payload after writing
+    // Zeroize the raw payload now; the sealed form is rebuilt (and zeroized)
+    // later in the Serpent-SIV block.
     zeroize(&mut payload);
-    zeroize(&mut inner);
-    zeroize(&mut double_wrapped);
+    // Legacy double-wrapped payload.bin is no longer emitted: the payload is
+    // LZMA-compressed + keystream-whitened and sealed via Serpent-SIV below.
 
     let mut rng = rand::rngs::OsRng;
 
@@ -608,18 +624,45 @@ fn build_main() {
 
     // ---- [Algorithm 7] Serpent-256-SIV: authenticated encryption of the payload ----
     // The plaintext is the sealed payload: [meta_len][meta_json][content],
-    // so the reveal can show who created it and when. Rebuild it here since
-    // the earlier copy was zeroized after payload.bin was written.
-    let mut sealed_payload = Vec::with_capacity(4 + meta_bytes.len() + content.len());
-    sealed_payload.extend_from_slice(&meta_len.to_le_bytes());
-    sealed_payload.extend_from_slice(&meta_bytes);
-    sealed_payload.extend_from_slice(&content);
-    let siv_blob = siv_encrypt_inner(&dek, &ts, &sealed_payload);
+    // so the reveal can show who created it and when. It is rebuilt here since
+    // the earlier copy of `payload` is zeroized below.
+    let mut sealed_payload = {
+        let mut sp = Vec::with_capacity(4 + meta_bytes.len() + content.len());
+        sp.extend_from_slice(&meta_len.to_le_bytes());
+        sp.extend_from_slice(&meta_bytes);
+        sp.extend_from_slice(&content);
+        sp
+    };
+    let plain_len = sealed_payload.len() as u32;
+
+    // Compress then whiten. LZMA shrinks the sealed payload; the compressed
+    // stream is XOR-masked with a keystream derived from k1||k2, so the DEK
+    // shards alone no longer suffice — the password-derived keys are required
+    // too. The SIV ciphertext then authenticates the whitened bytes.
+    let mut compressed = Vec::new();
+    {
+        let mut input = sealed_payload.as_slice();
+        lzma_rs::lzma_compress(&mut input, &mut compressed).expect("lzma compress");
+    }
     zeroize(&mut sealed_payload);
+
+    let mut ks = blake3_keystream(&k1, &k2, compressed.len());
+    let mut whitened = Vec::with_capacity(compressed.len());
+    for i in 0..compressed.len() {
+        whitened.push(compressed[i] ^ ks[i]);
+    }
+    zeroize(&mut ks);
+    zeroize(&mut compressed);
+
+    let siv_blob = siv_encrypt_inner(&dek, &ts, &whitened);
+    zeroize(&mut whitened);
     write_blob(&out_dir, "serpent_siv.bin", &siv_blob);
     // Store ciphertext length for display / parsing.
     let siv_len = (siv_blob.len() as u32).to_le_bytes();
     write_blob(&out_dir, "serpent_siv_len.bin", &siv_len);
+    // Plaintext (sealed) length so the runtime can size its secure buffer
+    // before inflating the LZMA stream.
+    write_blob(&out_dir, "serpent_plain_len.bin", &plain_len.to_le_bytes());
 
     // Wrap the DEK with the serpent-dek wrapping key for runtime recovery
     let dek_wrap = wrap_key(&serpent_dek_wrap_key, b"serpent-dek", &dek);

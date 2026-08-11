@@ -26,6 +26,7 @@ crystals-dilithium = "2.0"
 frodo-kem = { version = "0.1", features = ["frodo1344aes"] }
 sm3 = { version = "0.5", features = ["alloc"] }
 blake3 = "1.8"
+lzma-rs = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
@@ -67,6 +68,7 @@ zeroize = "1.7"
 hmac = "0.12"
 rand_core = "0.10"
 subtle = "2.5"
+lzma-rs = "0.3"
 
 [profile.release]
 opt-level = "z"

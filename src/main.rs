@@ -32,7 +32,8 @@ mod siv_mod {
 use siv_mod::{siv_decrypt};
 
 // Build-time embedded blobs for 7-layer runtime decryption
-const PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin")); // legacy, unused now
+const SERPENT_PLAIN_LEN: u32 =
+    u32::from_le_bytes(*include_bytes!(concat!(env!("OUT_DIR"), "/serpent_plain_len.bin")));
 const TS_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts.bin"));
 const TS_GUARD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ts_guard.bin"));
 const VM_PROG_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmprog.bin"));
@@ -405,6 +406,24 @@ fn key_copy64(buf: &SecBuf) -> [u8; 64] {
         std::ptr::copy_nonoverlapping(buf.ptr, k.as_mut_ptr(), 64);
     }
     k
+}
+
+/// Counter-mode keystream seeded from k1||k2 (blake3). Mirrors build.rs so the
+/// reveal can un-whiten the payload stream before LZMA inflation.
+fn blake3_keystream(seed: &[u8; 64], len: usize) -> Vec<u8> {
+    let seed = blake3::hash(seed);
+    let mut out = Vec::with_capacity(len);
+    let mut ctr: u64 = 0;
+    while out.len() < len {
+        let mut h = blake3::Hasher::new();
+        h.update(seed.as_bytes());
+        h.update(&ctr.to_le_bytes());
+        let block = h.finalize();
+        out.extend_from_slice(block.as_bytes());
+        ctr += 1;
+    }
+    out.truncate(len);
+    out
 }
 
 fn noop() {}
@@ -832,7 +851,7 @@ fn main() {
             &noop,
         ),
     };
-    let content_buf = match SecBuf::new(PAYLOAD.len()) {
+    let content_buf = match SecBuf::new(SERPENT_PLAIN_LEN as usize) {
         Some(b) => b,
         None => refuse(
             &["Memory lock failed".to_string(), "Access denied".to_string()],
@@ -1246,9 +1265,27 @@ fn main() {
 
     // Decrypt Serpent-256-SIV payload
     fx.draw(0.9, &beat);
-    let mut content = siv_decrypt(&combined_dek, &open_ts.to_le_bytes(), SIV_BLOB)
+    // The SIV plaintext is the LZMA-compressed sealed payload, whitened with a
+    // keystream derived from k1||k2. Un-whiten using the password-derived key
+    // held in the secure buffer, then inflate the LZMA stream.
+    let mut whitened = siv_decrypt(&combined_dek, &open_ts.to_le_bytes(), SIV_BLOB)
         .expect("SIV decrypt failed");
     crypto::zeroize(&mut combined_dek);
+
+    let mut seed64 = key_copy64(&key_buf);
+    let mut ks = blake3_keystream(&seed64, whitened.len());
+    crypto::zeroize(&mut seed64);
+    for i in 0..whitened.len() {
+        whitened[i] ^= ks[i];
+    }
+    crypto::zeroize(&mut ks);
+
+    let mut content = Vec::with_capacity(whitened.len());
+    {
+        let mut input = whitened.as_slice();
+        lzma_rs::lzma_decompress(&mut input, &mut content).expect("LZMA inflate failed");
+    }
+    crypto::zeroize(&mut whitened);
 
     // The sealed payload is [meta_len][meta_json][text]; pull out the metadata.
     let mut meta_lines: Vec<String> = Vec::new();
