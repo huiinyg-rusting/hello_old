@@ -8,9 +8,9 @@ use sm3::{Digest as Sm3Digest, Sm3};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-const ARGON2_MEMORY_KIB: u32 = 65536;
-const ARGON2_ITERATIONS: u32 = 3;
-const ARGON2_PARALLELISM: u32 = 4;
+const ARGON2_MEMORY_KIB: u32 = 262144;
+const ARGON2_ITERATIONS: u32 = 4;
+const ARGON2_PARALLELISM: u32 = 8;
 const ARGON2_OUTPUT_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;

@@ -38,9 +38,9 @@ macro_rules! binfo {
 
 const DEFAULT_PASSWORD: &[u8] = PASSWORD;
 const H1: usize = KEY_LEN / 2;
-const ARGON2_MEMORY_KIB: u32 = 65536;
-const ARGON2_ITERATIONS: u32 = 3;
-const ARGON2_PARALLELISM: u32 = 4;
+const ARGON2_MEMORY_KIB: u32 = 262144;
+const ARGON2_ITERATIONS: u32 = 4;
+const ARGON2_PARALLELISM: u32 = 8;
 const ARGON2_SALT_LEN: usize = 32;
 const ARGON2_OUTPUT_LEN: usize = 32;
 
@@ -110,25 +110,53 @@ fn blake3_256(data: &[u8]) -> [u8; 32] {
     *hash.as_bytes()
 }
 
-/// Counter-mode keystream seeded from k1||k2 (blake3). Both build.rs and
-/// main.rs derive identical streams so the reveal can un-whiten the payload.
-fn blake3_keystream(k1: &[u8; 32], k2: &[u8; 32], len: usize) -> Vec<u8> {
-    let mut seed = Vec::with_capacity(64);
-    seed.extend_from_slice(k1);
-    seed.extend_from_slice(k2);
-    let seed = blake3::hash(&seed);
-    let mut out = Vec::with_capacity(len);
+/// Deterministic 57-byte Ed448 secret for the binary self-signature. Derived
+/// from a fixed label so build.rs (which embeds the verifying key into the
+/// binary) and xtask (which signs the overlay) agree on the same key. Same
+/// code in both places — keep in sync.
+fn self_sign_secret() -> [u8; 57] {
+    let label = b"hello-old/self-sign-v1";
+    let mut out = [0u8; 57];
     let mut ctr: u64 = 0;
-    while out.len() < len {
+    let mut pos = 0;
+    while pos < 57 {
         let mut h = blake3::Hasher::new();
-        h.update(seed.as_bytes());
+        h.update(label);
         h.update(&ctr.to_le_bytes());
         let block = h.finalize();
-        out.extend_from_slice(block.as_bytes());
+        let n = (57 - pos).min(32);
+        out[pos..pos + n].copy_from_slice(&block.as_bytes()[..n]);
+        pos += n;
         ctr += 1;
     }
-    out.truncate(len);
     out
+}
+
+/// Counter-mode keystream seeded from blake3(k1||k2||salt). Both build.rs and
+/// main.rs derive identical streams so the reveal can un-whiten the payload.
+/// XORs `buf` in place (no extra keystream copy).
+fn blake3_keystream(k1: &[u8; 32], k2: &[u8; 32], salt: &[u8], buf: &mut [u8]) {
+    let mut seed_vec = Vec::with_capacity(64 + salt.len());
+    seed_vec.extend_from_slice(k1);
+    seed_vec.extend_from_slice(k2);
+    seed_vec.extend_from_slice(salt);
+    let mut seed: [u8; 32] = *blake3::hash(&seed_vec).as_bytes();
+    zeroize(&mut seed_vec);
+    let mut ctr: u64 = 0;
+    let mut pos = 0;
+    while pos < buf.len() {
+        let mut h = blake3::Hasher::new();
+        h.update(&seed);
+        h.update(&ctr.to_le_bytes());
+        let block = h.finalize();
+        let n = (buf.len() - pos).min(32);
+        for i in 0..n {
+            buf[pos + i] ^= block.as_bytes()[i];
+        }
+        pos += n;
+        ctr += 1;
+    }
+    zeroize(&mut seed);
 }
 
 fn nonce_for(key: &[u8; 32], label: &[u8]) -> [u8; 12] {
@@ -355,6 +383,10 @@ fn build_main() {
     let mut salt = [0u8; ARGON2_SALT_LEN];
     getrandom(&mut salt).expect("getrandom failed");
     write_blob(&out_dir, "salt.bin", &salt);
+    // Keep the Argon2 salt alive: the FrodoKEM block later shadows `salt` with
+    // its own per-scheme salt, and the SIV whitening must use the KDF salt to
+    // match what main.rs reads back from salt.bin.
+    let kdf_salt: [u8; ARGON2_SALT_LEN] = salt;
 
     let password = DEFAULT_PASSWORD;
 
@@ -636,9 +668,9 @@ fn build_main() {
     let plain_len = sealed_payload.len() as u32;
 
     // Compress then whiten. LZMA shrinks the sealed payload; the compressed
-    // stream is XOR-masked with a keystream derived from k1||k2, so the DEK
-    // shards alone no longer suffice — the password-derived keys are required
-    // too. The SIV ciphertext then authenticates the whitened bytes.
+    // stream is XOR-masked with a keystream derived from k1||k2||salt, so the
+    // DEK shards alone no longer suffice — the password-derived keys are
+    // required too. The SIV ciphertext then authenticates the whitened bytes.
     let mut compressed = Vec::new();
     {
         let mut input = sealed_payload.as_slice();
@@ -646,16 +678,9 @@ fn build_main() {
     }
     zeroize(&mut sealed_payload);
 
-    let mut ks = blake3_keystream(&k1, &k2, compressed.len());
-    let mut whitened = Vec::with_capacity(compressed.len());
-    for i in 0..compressed.len() {
-        whitened.push(compressed[i] ^ ks[i]);
-    }
-    zeroize(&mut ks);
+    blake3_keystream(&k1, &k2, &kdf_salt, &mut compressed);
+    let siv_blob = siv_encrypt_inner(&dek, &ts, &compressed);
     zeroize(&mut compressed);
-
-    let siv_blob = siv_encrypt_inner(&dek, &ts, &whitened);
-    zeroize(&mut whitened);
     write_blob(&out_dir, "serpent_siv.bin", &siv_blob);
     // Store ciphertext length for display / parsing.
     let siv_len = (siv_blob.len() as u32).to_le_bytes();
@@ -682,6 +707,17 @@ fn build_main() {
     let sig: Signature = ed_sk.sign_raw(&msg);
     write_blob(&out_dir, "ed_sig.bin", sig.to_bytes().as_ref());
     binfo!("Ed448: vk=57B sig=114B over (ts|dek|sha256(siv)) signed");
+
+    // ---- Self-signature: deterministic fixed key (embedded vk) ----
+    // The PE-overlay self-signature used to be produced by xtask with a fresh
+    // random key every run, which made it meaningless (anyone could re-sign the
+    // binary with their own key). Now the verifying key is derived from a fixed
+    // label and embedded in the binary at build time; xtask derives the same
+    // key and signs the overlay. An attacker who patches the file can no longer
+    // re-sign it — the embedded vk will simply not match.
+    let self_sk = SigningKey::try_from(self_sign_secret().as_slice()).expect("self-sign key");
+    write_blob(&out_dir, "selfsig_vk.bin", self_sk.verifying_key().to_bytes().as_ref());
+    drop(self_sk); // SigningKey's Drop zeroizes the secret automatically.
 
     // ---- [Algorithm 9] CRYSTALS-Dilithium-5: sign the binding message ----
     let dilithium_sig = dilithium_keypair.sign(&msg, None, RandomMode::Hedged).expect("Dilithium sign");

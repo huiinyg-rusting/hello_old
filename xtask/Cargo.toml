@@ -6,5 +6,6 @@ publish = false
 
 [dependencies]
 ed448-goldilocks = "0.14.0-pre.15"
+blake3 = "1.8"
 
 [workspace]

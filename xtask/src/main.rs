@@ -1,12 +1,31 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ed448_goldilocks::elliptic_curve::Generate;
-use ed448_goldilocks::Signature;
-use ed448_goldilocks::SigningKey;
+use ed448_goldilocks::{Signature, SigningKey};
 
 const MAGIC: &[u8; 8] = b"HLDLSIG1";
 const SIG_FMT_LEN: usize = 8 + 8 + 57 + 114;
+
+/// Deterministic 57-byte Ed448 secret, identical to build.rs so the embedded
+/// verifying key (selfsig_vk.bin) matches what this tool signs with. Keep in
+/// sync with build.rs::self_sign_secret().
+fn self_sign_secret() -> [u8; 57] {
+    let label = b"hello-old/self-sign-v1";
+    let mut out = [0u8; 57];
+    let mut ctr: u64 = 0;
+    let mut pos = 0;
+    while pos < 57 {
+        let mut h = blake3::Hasher::new();
+        h.update(label);
+        h.update(&ctr.to_le_bytes());
+        let block = h.finalize();
+        let n = (57 - pos).min(32);
+        out[pos..pos + n].copy_from_slice(&block.as_bytes()[..n]);
+        pos += n;
+        ctr += 1;
+    }
+    out
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -21,7 +40,7 @@ fn main() {
 
     let data = fs::read(&exe).expect("read exe");
     let covered = data.len();
-    let sk = SigningKey::generate();
+    let sk = SigningKey::try_from(self_sign_secret().as_slice()).expect("self-sign key");
     let vk = sk.verifying_key();
     let sig: Signature = sk.sign_raw(&data);
 

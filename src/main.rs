@@ -69,6 +69,11 @@ const DEK_WRAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dek_wrap.bin")
 const ED_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_vk.bin"));
 const ED_SIG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ed_sig.bin"));
 
+/// Verifying key for the PE-overlay self-signature, embedded at build time. The
+/// key is fixed (derived deterministically in build.rs / xtask), so patching
+/// the binary cannot be concealed by re-signing with a fresh random key.
+const SELF_SIG_VK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/selfsig_vk.bin"));
+
 #[cfg(target_os = "linux")]
 struct SecBuf {
     base: *mut u8,
@@ -408,25 +413,66 @@ fn key_copy64(buf: &SecBuf) -> [u8; 64] {
     k
 }
 
-/// Counter-mode keystream seeded from k1||k2 (blake3). Mirrors build.rs so the
-/// reveal can un-whiten the payload stream before LZMA inflation.
-fn blake3_keystream(seed: &[u8; 64], len: usize) -> Vec<u8> {
-    let seed = blake3::hash(seed);
-    let mut out = Vec::with_capacity(len);
+/// Counter-mode keystream seeded from blake3(k1||k2||salt). Mirrors build.rs so
+/// the reveal can un-whiten the payload stream before LZMA inflation. XORs
+/// `buf` in place (no extra keystream copy), then wipes its seed.
+fn blake3_keystream(seed64: &[u8; 64], salt: &[u8], buf: &mut [u8]) {
+    let mut seed_vec = Vec::with_capacity(64 + salt.len());
+    seed_vec.extend_from_slice(seed64);
+    seed_vec.extend_from_slice(salt);
+    let mut seed: [u8; 32] = *blake3::hash(&seed_vec).as_bytes();
+    crypto::zeroize(&mut seed_vec);
     let mut ctr: u64 = 0;
-    while out.len() < len {
+    let mut pos = 0;
+    while pos < buf.len() {
         let mut h = blake3::Hasher::new();
-        h.update(seed.as_bytes());
+        h.update(&seed);
         h.update(&ctr.to_le_bytes());
         let block = h.finalize();
-        out.extend_from_slice(block.as_bytes());
+        let n = (buf.len() - pos).min(32);
+        for i in 0..n {
+            buf[pos + i] ^= block.as_bytes()[i];
+        }
+        pos += n;
         ctr += 1;
     }
-    out.truncate(len);
-    out
+    crypto::zeroize(&mut seed);
 }
 
 fn noop() {}
+
+/// Bounded `Write` into a SecBuf-backed region so LZMA inflate can land the
+/// plaintext directly in the locked, guard-paged buffer — it never sits in an
+/// ordinary (swappable, dumpable) heap Vec. Refuses writes past `cap`.
+struct LockedWriter {
+    ptr: *mut u8,
+    cap: usize,
+    len: usize,
+}
+
+impl std::io::Write for LockedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.cap.saturating_sub(self.len);
+        let n = buf.len().min(room);
+        if n > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf.as_ptr(), self.ptr.add(self.len), n);
+            }
+            self.len += n;
+        }
+        if n < buf.len() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "locked buffer overflow",
+            ))
+        } else {
+            Ok(n)
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Side-channel hardening: burn a fixed, secret-independent amount of work
 /// so a wrong password takes ~as long as a full derivation before revealing
@@ -595,6 +641,13 @@ fn verify_blob_integrity() -> bool {
 /// verifying_key(57) | signature(114). `covered` is the number of leading bytes
 /// that were signed. At runtime we re-read the running exe, locate the trailing
 /// block, and verify [0..covered) with the embedded key.
+/// Full-file Ed448 self-signature check. The build pipeline (cargo xtask sign)
+/// appends a signature block to the PE overlay: magic(8) | covered_len(u64) |
+/// verifying_key(57) | signature(114). `covered` is the number of leading bytes
+/// that were signed. At runtime we re-read the running exe, locate the trailing
+/// block, and verify [0..covered) against the build-time-embedded verifying key
+/// (SELF_SIG_VK) — never the vk stored in the overlay, which an attacker could
+/// simply replace along with the signature.
 fn verify_self_signature() -> bool {
     const MAGIC_X: &[u8; 8] = &[
         b'H' ^ 0x5a, b'L' ^ 0x5a, b'D' ^ 0x5a, b'L' ^ 0x5a,
@@ -618,9 +671,9 @@ fn verify_self_signature() -> bool {
     if covered > block_off {
         return false;
     }
-    let mut vk_bytes = [0u8; 57];
-    vk_bytes.copy_from_slice(&data[block_off + 16..block_off + 16 + 57]);
-    let Ok(vk) = ed448_goldilocks::VerifyingKey::from_bytes(&vk_bytes) else {
+    let Ok(vk) = ed448_goldilocks::VerifyingKey::from_bytes(
+        SELF_SIG_VK.try_into().expect("embedded self-sign vk len"),
+    ) else {
         return false;
     };
     let sig_bytes = &data[block_off + 16 + 57..block_off + 16 + 57 + 114];
@@ -1273,47 +1326,51 @@ fn main() {
     crypto::zeroize(&mut combined_dek);
 
     let mut seed64 = key_copy64(&key_buf);
-    let mut ks = blake3_keystream(&seed64, whitened.len());
+    blake3_keystream(&seed64, SALT, &mut whitened);
     crypto::zeroize(&mut seed64);
-    for i in 0..whitened.len() {
-        whitened[i] ^= ks[i];
-    }
-    crypto::zeroize(&mut ks);
 
-    let mut content = Vec::with_capacity(whitened.len());
+    // Inflate the LZMA stream directly into the locked, guard-paged secure
+    // buffer — the plaintext never passes through an ordinary heap Vec.
+    beat();
+    let mut writer = LockedWriter {
+        ptr: content_buf.ptr,
+        cap: content_buf.usable,
+        len: 0,
+    };
     {
         let mut input = whitened.as_slice();
-        lzma_rs::lzma_decompress(&mut input, &mut content).expect("LZMA inflate failed");
+        lzma_rs::lzma_decompress(&mut input, &mut writer).expect("LZMA inflate failed");
     }
     crypto::zeroize(&mut whitened);
+    let sealed_len = writer.len;
+    crypto::flush_mem(content_buf.ptr, sealed_len);
+    scrub_stack();
 
-    // The sealed payload is [meta_len][meta_json][text]; pull out the metadata.
-    let mut meta_lines: Vec<String> = Vec::new();
-    let mut text = Vec::new();
-    if content.len() >= 4 {
-        let meta_len = u32::from_le_bytes([content[0], content[1], content[2], content[3]]) as usize;
-        if content.len() >= 4 + meta_len {
-            let meta_json = &content[4..4 + meta_len];
-            meta_lines = parse_meta(meta_json);
-            text.extend_from_slice(&content[4 + meta_len..]);
+    // The sealed payload is [meta_len][meta_json][text]; pull out the metadata
+    // in place from the locked buffer, then slide the text to the buffer start.
+    let (mut meta_lines, text_off, text_len) = if sealed_len >= 4 {
+        let meta_len =
+            u32::from_le_bytes(unsafe { *(content_buf.ptr as *const [u8; 4]) }) as usize;
+        if sealed_len >= 4 + meta_len {
+            let meta_json = unsafe { std::slice::from_raw_parts(content_buf.ptr.add(4), meta_len) };
+            (parse_meta(meta_json), 4 + meta_len, sealed_len - (4 + meta_len))
         } else {
-            text.extend_from_slice(&content[4..]);
+            (Vec::new(), 4, sealed_len - 4)
         }
     } else {
-        text.extend_from_slice(&content);
+        (Vec::new(), 0, sealed_len)
+    };
+    // Slide the text region to the start of the buffer so display/rolling code
+    // can treat the buffer as holding exactly the plaintext.
+    if text_off > 0 && text_len > 0 {
+        unsafe {
+            std::ptr::copy(content_buf.ptr.add(text_off), content_buf.ptr, text_len);
+        }
     }
-
-    // Copy content into secure buffer
-    beat();
-    unsafe {
-        std::ptr::copy_nonoverlapping(text.as_ptr(), content_buf.ptr, text.len());
-    }
-    crypto::flush_mem(content_buf.ptr, text.len());
-    crypto::zeroize(content.as_mut_slice());
-    scrub_stack();
+    crypto::flush_mem(content_buf.ptr, text_len);
     // X2: keep the decrypted content ciphertext-at-rest in the secure buffer;
     // the mask is rotated by the watchdog until we are ready to display.
-    rolling::arm(content_buf.ptr, text.len());
+    rolling::arm(content_buf.ptr, text_len);
 
     fx.finish(&beat);
 
@@ -1335,7 +1392,7 @@ fn main() {
     // X2: decrypt the content back for display. The plaintext is exposed only
     // here, briefly, then the rolling cipher is disarmed and the mask wiped.
     rolling::disarm();
-    let revealed = unsafe { std::slice::from_raw_parts(content_buf.ptr, text.len()) };
+    let revealed = unsafe { std::slice::from_raw_parts(content_buf.ptr, text_len) };
     let mut revealed = String::from_utf8_lossy(revealed).into_owned();
     let mut all = report;
     for line in meta_lines {
@@ -1354,7 +1411,7 @@ fn main() {
     drop(revealed);
     // Re-encrypt the secure buffer: plaintext residency was limited to the copy
     // above; from here on the buffer holds rotating ciphertext again until exit.
-    rolling::arm(content_buf.ptr, text.len());
+    rolling::arm(content_buf.ptr, text_len);
 
     beat();
     let unlock_time = format_unix(open_ts);
@@ -1367,17 +1424,14 @@ fn main() {
         // Wipe the (masked) content in the secure buffer before locking it away.
         rolling::disarm();
         unsafe {
-            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text.len());
+            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text_len);
             for x in b.iter_mut() {
                 std::ptr::write_volatile(x, 0);
             }
         }
-        crypto::flush_mem(content_buf.ptr, text.len());
+        crypto::flush_mem(content_buf.ptr, text_len);
         key_buf.lock_none();
         content_buf.lock_none();
-
-        // Zeroize content before exit
-        crypto::zeroize(content.as_mut_slice());
 
         // The user confirmed the burn: release the exe lock first, then remove
         // the binary and the diagnostic log we may have written during this run.
@@ -1395,12 +1449,12 @@ fn main() {
         // decrypted content from the secure buffer before exiting.
         rolling::disarm();
         unsafe {
-            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text.len());
+            let b = std::slice::from_raw_parts_mut(content_buf.ptr, text_len);
             for x in b.iter_mut() {
                 std::ptr::write_volatile(x, 0);
             }
         }
-        crypto::flush_mem(content_buf.ptr, text.len());
+        crypto::flush_mem(content_buf.ptr, text_len);
         content_buf.lock_none();
         tui::show_cursor();
         std::process::exit(0);

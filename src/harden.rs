@@ -82,20 +82,33 @@ pub fn raise_process_mitigations() {
         type FnType = unsafe extern "system" fn(u32, *const std::ffi::c_void, usize) -> i32;
         let f: FnType = std::mem::transmute(p);
 
-        // PROCESS_CREATE_DYNAMIC_CODE_POLICY (2): value 1 disables dynamic code.
-        let mut dyn_policy = [0u8; 8];
-        dyn_policy[0] = 1;
-        let _ = f(2, dyn_policy.as_ptr() as *const _, dyn_policy.len());
+        // PROCESS_MITIGATION_POLICY IDs:
+        //   0 DEP, 1 ASLR, 2 DynamicCode, 3 StrictHandle, 7 ControlFlowGuard,
+        //   8 Signature, 10 ImageLoad. Each struct is a 4-byte DWORD union.
+        // Best-effort: a policy that fails on an older OS is silently ignored.
+        macro_rules! apply {
+            ($pol:expr, $val:expr) => {
+                let flags: u32 = $val;
+                let data = flags.to_ne_bytes();
+                let _ = f($pol, data.as_ptr() as *const _, data.len());
+            };
+        }
 
-        // PROCESS_STRICT_HANDLE_CHECK_POLICY (1): raise handle exceptions.
-        let mut strict = [0u8; 4];
-        strict[0] = 1;
-        let _ = f(1, strict.as_ptr() as *const _, strict.len());
+        // ASLR (1): bottom-up randomization + force-relocate + high-entropy VA.
+        apply!(1, 0x0000_0007u32);
 
-        // PROCESS_ASLR_POLICY (5): bottom-up randomization on.
-        let mut aslr = [0u8; 8];
-        aslr[0] = 1;
-        let _ = f(5, aslr.as_ptr() as *const _, aslr.len());
+        // Dynamic code (2): ProhibitDynamicCode, disallow JIT / shellcode mapping.
+        apply!(2, 0x0000_0001u32);
+
+        // Strict handle checks (3): raise on invalid handle usage.
+        apply!(3, 0x0000_0001u32);
+
+        // Control Flow Guard (7): enforce CFG bitmap on indirect calls.
+        apply!(7, 0x0000_0001u32);
+
+        // Image load (10): no remote images, no low-mandatory-label images,
+        // prefer System32. Blocks DLL hijacking / sideloading.
+        apply!(10, 0x0000_0007u32);
     }
 }
 
