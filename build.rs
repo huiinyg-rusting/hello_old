@@ -110,18 +110,44 @@ fn blake3_256(data: &[u8]) -> [u8; 32] {
     *hash.as_bytes()
 }
 
-/// Deterministic 57-byte Ed448 secret for the binary self-signature. Derived
-/// from a fixed label so build.rs (which embeds the verifying key into the
-/// binary) and xtask (which signs the overlay) agree on the same key. Same
-/// code in both places — keep in sync.
+/// Master signing secret (32 bytes) for the binary self-signature. It is NOT
+/// derivable from source: it comes from the HELLO_OLD_SELF_SIGN_KEY env var
+/// (64 hex chars) or the git-ignored file <repo>/signing/selfsign.key. build.rs
+/// and xtask must both use the same secret, so the embedded verifying key and
+/// the overlay signature always agree. If no secret is available the build
+/// FAILS — we never emit a binary whose signature can be re-forged by anyone
+/// who has only the source.
 fn self_sign_secret() -> [u8; 57] {
-    let label = b"hello-old/self-sign-v1";
+    let mut seed = [0u8; 32];
+    let loaded = if let Ok(hex) = std::env::var("HELLO_OLD_SELF_SIGN_KEY") {
+        seed = decode_hex32(hex.trim())
+            .unwrap_or_else(|e| panic!("HELLO_OLD_SELF_SIGN_KEY invalid: {e}"));
+        true
+    } else {
+        let root = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let path = std::path::Path::new(&root).join("signing").join("selfsign.key");
+        println!("cargo:rerun-if-changed={}", path.display());
+        if let Ok(hex) = std::fs::read_to_string(&path) {
+            seed = decode_hex32(hex.trim())
+                .unwrap_or_else(|e| panic!("{} invalid: {e}", path.display()));
+            true
+        } else {
+            false
+        }
+    };
+    if !loaded {
+        panic!(
+            "refusing to build: no self-signing secret. Set HELLO_OLD_SELF_SIGN_KEY (64 hex chars) \
+             or provide signing/selfsign.key (a build artifact, git-ignored)."
+        );
+    }
+    // Expand the 32-byte seed to the 57-byte Ed448 scalar in counter mode.
     let mut out = [0u8; 57];
     let mut ctr: u64 = 0;
     let mut pos = 0;
     while pos < 57 {
         let mut h = blake3::Hasher::new();
-        h.update(label);
+        h.update(&seed);
         h.update(&ctr.to_le_bytes());
         let block = h.finalize();
         let n = (57 - pos).min(32);
@@ -130,6 +156,29 @@ fn self_sign_secret() -> [u8; 57] {
         ctr += 1;
     }
     out
+}
+
+fn decode_hex32(s: &str) -> Result<[u8; 32], String> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = hex_nibble(bytes[2 * i])?;
+        let lo = hex_nibble(bytes[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(b: u8) -> Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(format!("non-hex byte {:?}", b as char)),
+    }
 }
 
 /// Counter-mode keystream seeded from blake3(k1||k2||salt). Both build.rs and
