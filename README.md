@@ -25,7 +25,7 @@ AI made
 
 ```
 口令
- │  Argon2id (64 MiB, 3 iter)
+ │  Argon2id (256 MiB, 4 iter, 8 lanes)
  ▼
 主密钥 → RustyVM 自定义虚拟机（16 条指令，常量时间执行）
  │  从加密的 km.bin 中重建 k1∥k2
@@ -45,16 +45,20 @@ AI made
   Ed448 + Dilithium-5 双重签名验证 (时间戳 ∥ DEK ∥ SHA3-256(密封载荷))
   ▼
   Serpent-256-SIV 解密载荷
+    └─► 用 k1∥k2∥SALT 密钥流去白化
+    └─► LZMA 解压回 [meta_len][meta_json][正文]
+    └─► 明文直接写入锁定 + 护栏页缓冲，不经普通堆
   ```
 
   - 共 6 片 shard XOR 得 256-bit DEK：`RSA ⊕ Kyber ⊕ McEliece ⊕ FrodoKEM ⊕ SHA3-256(Dilithium VK) ⊕ SM3-256(Dilithium VK)`。
   - 最后两片分别用 **BLAKE3** 与 **SM3** (国密) 哈希同一把 Dilithium 公钥——两种独立哈希，缺一即使 DEK 重组失败。
+  - 载荷先 LZMA 压缩、再用 `k1∥k2∥SALT` 派生的 blake3 密钥流逐字节异或白化，最后才进 Serpent-SIV——即便拿到 DEK 也仍需密码派生的 k1∥k2 才可还原明文。
 
 **破解者必须同时面对：**
 
 | 维度 | 强度 |
 |---|---|
-| 密钥派生 | Argon2id：64 MiB 内存硬、3 次迭代，暴力成本高昂 |
+| 密钥派生 | Argon2id：256 MiB 内存硬、4 次迭代、8 路并行，暴力成本高昂 |
 | 后量子 KEM ×4 | RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344，任一不破则 DEK 重组失败 |
 | 签名 ×2 | Ed448 + CRYSTALS-Dilithium-5（ML-DSA-87），篡改即自毁 |
 | 对称加密 | Serpent-256-SIV：认证加密 + 不可约简的安全证明 |
@@ -85,6 +89,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 - 通用 x86-64 指令集（`target-cpu=x86-64`），可复制到任意 x86_64 Linux 机器运行，不绑定构建机 CPU 特性。
 - 完全静态链接，无任何运行时依赖。
 - 口令在 `shared.rs`（默认 `114514`），SALT 每次构建随机生成。
+- **release 产物必须签名**：签名私钥由 `HELLO_OLD_SELF_SIGN_KEY` 环境变量或 `signing/selfsign.key`（git 忽略）提供，缺密钥则拒绝构建；产物需 `cargo xtask sign` 后才会运行（见下方「构建流程」）。
 
 ### 配置（改这 4 处即可定制）
 
@@ -191,14 +196,17 @@ printf '114514\n' | ./hello_old   # 管道自动化
 - 解密后刷栈（`scrub_stack`）+ `flush_mem` 补 `mfence/lfence`。
 - 所有敏感比较（watchdog 密钥哈希、Serpent-SIV tag、DEK 校验）改用常数时间 `ct_eq`。
 
-**X1 — 全文件 Ed448 自签名**
-- `xtask` 构建工具对 exe 全文件做 Ed448 签名（约 187 字节签名档，追加在 PE overlay 末尾）。
-- 运行启动时重读自身文件并验证签名；失败打印警告并拒绝运行（exit 138）。
-- 私钥随机生成、用后即弃，仓库无敏感物；防的是"改逻辑没重签"的粗心 patch。
+**X1 — 全文件 Ed448 自签名（防篡改）**
+- 签名私钥**不来自源码**：由环境变量 `HELLO_OLD_SELF_SIGN_KEY`（64 hex）或 git 忽略的密钥文件 `signing/selfsign.key` 提供，持有源码者无法重新派生。
+- build.rs 构建时把对应**公钥内嵌进二进制**，运行时 `verify_self_signature` 只认内嵌公钥、不信任 overlay 里自带的 vk——用自己生成的随机密钥重签无效。
+- `xtask sign` 对 exe 全文件做 Ed448 签名（约 187 字节签名档，追加在 PE overlay 末尾）。
+- 改一字节即校验失败、拒绝运行（exit 138）。
+- **无密钥即不可伪造**：缺少密钥时 `cargo build --release` 直接报错、`xtask` 拒绝签名，杜绝产出可被重签的产物。密钥文件须作为机密离线保管，泄露则防篡改失效。
 
 **X2 — 内存滚动加密**
 - 解密内容写入安全缓冲后立即用进程随机掩码 XOR 加密；watchdog 每 400ms 滚动更换掩码，任意时刻 dump 得到的是已被滚动的密文。
 - 显示前才解密，随后掩码清零。明文驻留窗口以毫秒计。
+- LZMA 解压直接落在锁定 + `PROT_NONE` 护栏页缓冲（限界 `Write`），明文不经普通堆分配，防换出/防转储。
 
 **X3 — 双 watchdog 互监控**
 - 两个独立 watchdog 线程共享心跳槽；任一被 kill，另一方检测到兄弟心跳过期即 fail-fast 自杀。主线程 `beat()` 同步刷新心跳。
@@ -208,17 +216,23 @@ printf '114514\n' | ./hello_old   # 管道自动化
 
 **M — 杂项加固**
 - M1 周期反调试：`debugger_present()` 从 watchdog 每 400ms 重跑，运行中挂调试器也会 fail-fast（不只在启动时检测一次）。
-- M3 进程迁移策略：动态加载 `SetProcessMitigationPolicy`，启用动态代码禁用、严格句柄检查、底部随机 ASLR。
+- M3 进程迁移策略：动态加载 `SetProcessMitigationPolicy`，启用 ASLR（底部随机+强制重定位+高熵）、动态代码禁用、严格句柄检查、Control Flow Guard、镜像加载策略（禁远程/低标级图像、优先 System32）。
 - M4 不透明谓词：`time_gate_open` 内插恒真/恒假代数欺骗，掩埋真实时间判定。
 - M5 字符串混淆：签名 MAGIC 与调试器窗口标题以 XOR 字节存于 `.rodata`，运行时解掩，静态扫描看不到明文。
 - M6 内嵌 blob 完整性：VM 程序字节码的 blake3 由 build.rs 生成内嵌，启动校验，内存 hook 拒绝运行。
 - M7 代码段内存自校验：watchdog 对运行中 `.text` 内存做基线 + 周期 hash 对比，运行期被改写即 fail-fast（补 X1 只防启动前的缺口）。
 - M8 调试对象侦察：`NtQueryInformationProcess` 追加 `ProcessDebugObjectHandle(0x1e)` 与 `ProcessDebugFlags(0x1f)`。
 
-**构建流程**
+**构建流程（自签名密钥先行）**
 ```
-cargo build                    # 普通构建
+# 0.（一次性）生成自签名私钥 —— 请离线/私密保管，勿提交
+$rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+$b = New-Object byte[] 32; $rng.GetBytes($b)
+([System.BitConverter]::ToString($b) -replace '-','').ToLower() | Set-Content signing/selfsign.key
+#   或用环境变量替代文件：$env:HELLO_OLD_SELF_SIGN_KEY = "<64 hex>"
+
+cargo build --release              # 无密钥则拒绝构建（不产出可伪造产物）
 cargo run --manifest-path xtask/Cargo.toml -- \
-    target/release/hello_old.exe target/release/hello_old.exe   # 签名（就地覆盖）
+    target/release/hello_old.exe target/release/hello_old.exe   # 签名（就地覆盖，无密钥则拒绝）
 ```
-未经签名的二进制会拒绝运行——这是有意为之的完整性门。
+未经签名、或签名私钥与构建时不匹配的二进制会拒绝运行——这是有意为之的完整性门。任何对已签名二进制的字节级修改都会导致校验失败。

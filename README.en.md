@@ -29,7 +29,7 @@ Decryption is not a single step but a chain that must be breached layer by layer
 
 ```
 passphrase
- │  Argon2id (64 MiB, 3 iters)
+ │  Argon2id (256 MiB, 4 iters, 8 lanes)
  ▼
 master key → RustyVM custom VM (16 opcodes, constant-time execution)
  │  reconstructs k1∥k2 from encrypted km.bin
@@ -49,17 +49,23 @@ master key → RustyVM custom VM (16 opcodes, constant-time execution)
   Ed448 + Dilithium-5 dual signature verify (ts∥DEK∥payload-hash)
   ▼
   Serpent-256-SIV decrypt payload
+    └─► de-whiten with k1∥k2∥SALT keystream
+    └─► LZMA inflate back to [meta_len][meta_json][text]
+    └─► plaintext lands directly in a locked+guard-paged buffer, never a heap Vec
   ```
 
   ① `RSA ⊕ Kyber ⊕ McEliece ⊕ FrodoKEM ⊕ SHA3-256(Dilithium VK) ⊕ SM3-256(Dilithium VK)`
   → 256-bit DEK. The last two shards hash the *same* Dilithium public key with two independent
   primitives (BLAKE3 + SM3); defeating one hash still leaves the other, so DEK recombination fails.
+  The payload is LZMA-compressed, then byte-XOR-whitened with a blake3 keystream derived from
+  `k1∥k2∥SALT`, and only then sealed with Serpent-SIV — possessing the DEK alone is still not
+  enough; the password-derived keys are required to recover the plaintext.
 
 **An attacker must simultaneously defeat:**
 
 | Dimension | Strength |
 |---|---|
-| Key derivation | Argon2id: 64 MiB memory-hard, 3 iterations — brute force is expensive |
+| Key derivation | Argon2id: 256 MiB memory-hard, 4 iterations, 8 lanes — brute force is expensive |
 | Post-quantum KEM ×4 | RSA-4096-OAEP + Kyber-1024 + McEliece-6960119f + FrodoKEM-1344 — miss one and DEK recombination fails |
 | Signatures ×2 | Ed448 + CRYSTALS-Dilithium-5 (ML-DSA-87) — tamper and it self-destructs |
 | Symmetric cipher | Serpent-256-SIV: authenticated encryption with a strong security proof |
@@ -161,6 +167,21 @@ Before the hour → refused, time remaining shown; at the hour → enter passphr
 - **Piped automation**: `printf 'pass' | ./hello_old` works, so it slots into scripts and CI.
 - **Build-time randomization, anti-fingerprint**: SALT is regenerated every build, so each binary ships different keys — no master key for every door.
 - **Self-deleting to the end**: press `q` and the binary removes itself from disk — not even the program survives.
+- **Tamper-proof signing**: the self-signature private key is **not derivable from source** — it comes from the `HELLO_OLD_SELF_SIGN_KEY` env var (64 hex) or the git-ignored `signing/selfsign.key` file. `build.rs` embeds the matching public key into the binary, and at runtime verification trusts only that embedded key (never the one in the overlay), so re-signing with a fresh random key does not work. Editing even one byte of a signed binary makes it refuse to run (exit 138). Without the secret, `cargo build --release` *refuses to build* and `xtask` *refuses to sign* — no forgeable artifact can be produced. Guard the key offline as a secret; if it leaks, tamper protection is void and you must regenerate and rebuild.
+
+### Build & Sign
+
+```bash
+# 0. (one-time) generate the self-sign private key — keep offline, never commit
+python -c "import secrets;print(secrets.token_hex(32))" > signing/selfsign.key
+#    or export HELLO_OLD_SELF_SIGN_KEY="<64 hex chars>" instead of the file
+
+cargo build --release          # refuses to build without the key
+cargo run --manifest-path xtask/Cargo.toml -- \
+    target/release/hello_old target/release/hello_old   # sign in place (refuses without key)
+```
+
+Unsigned binaries, or binaries whose signature private key does not match the build-time key, are refused at startup — a deliberate integrity gate.
 
 ### Cracking Difficulty
 
